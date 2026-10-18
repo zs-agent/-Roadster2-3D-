@@ -4713,156 +4713,6 @@
      —— 全部复用已有车模与障碍池，逐帧只改位置，不新建对象
   ========================================================= */
 
-  /* ---------- 幽灵车 ---------- */
-  var GHOST_KEY = 'roadster-neon-ghost';
-  var GHOST_RATE = 0.12;          // 每 0.12s 一帧
-  var GHOST_MAX_FRAMES = 8000;    // 约 16 分钟，超出停止录制
-  var GHOST_Z_AHEAD = -6.5;
-  var GHOST_Z_BEHIND = 6.5;
-  var GHOST_PROMPT_COOLDOWN = 6;
-
-  var ghost = {
-    best: null,      // { score, frames:[[x,y],...], rate } —— 上一局最佳回放
-    rec: [],         // 本局录制缓冲（[x, y]，保存时再转 {x,y} 并保留 2 位小数）
-    acc: 0,
-    recording: false,
-    car: null,       // 懒创建，整局复用
-    active: false,
-    startIdx: 0,     // 调试强制生成时的时间轴偏移
-    ahead: true,
-    promptT: 0
-  };
-
-  function loadGhostBest() {
-    try {
-      var raw = localStorage.getItem(GHOST_KEY);
-      if (!raw) return null;
-      var d = JSON.parse(raw);
-      if (!d || !d.frames || d.frames.length < 2) return null;
-      var frames = [];
-      for (var i = 0; i < d.frames.length; i++) {
-        var f = d.frames[i];
-        var fx = Array.isArray(f) ? f[0] : f.x;
-        var fy = Array.isArray(f) ? f[1] : f.y;
-        if (typeof fx !== 'number' || typeof fy !== 'number') continue;
-        frames.push([fx, fy]);
-      }
-      if (frames.length < 2) return null;
-      return { score: +d.score || 0, frames: frames, rate: d.rate > 0 ? d.rate : GHOST_RATE };
-    } catch (e) { return null; }
-  }
-
-  function buildGhostCar() {
-    var base = buildTrafficCar('sports');
-    var ghostMat = new THREE.MeshBasicMaterial({
-      color: 0x6fe8ff, transparent: true, opacity: .28, wireframe: false, depthWrite: false
-    });
-    var wireMat = new THREE.MeshBasicMaterial({
-      color: 0x6fe8ff, transparent: true, opacity: .35, wireframe: true, depthWrite: false
-    });
-    var root = new THREE.Group();
-    for (var pass = 0; pass < 2; pass++) {
-      var clone = base.clone();
-      var mat = pass === 0 ? ghostMat : wireMat;
-      clone.traverse(function (n) {
-        if (n.isMesh) {
-          n.material = mat;
-          n.castShadow = false;
-          n.receiveShadow = false;
-        } else if (n.isSprite) {
-          n.visible = false;
-        }
-      });
-      root.add(clone);
-    }
-    root.visible = false;
-    scene.add(root);
-    return root;
-  }
-
-  function ghostStop() {
-    ghost.recording = false;
-    ghost.active = false;
-    if (ghost.car) ghost.car.visible = false;
-  }
-
-  function ghostStartRound() {
-    ghost.rec.length = 0;
-    ghost.acc = 0;
-    ghost.promptT = 0;
-    ghost.startIdx = 0;
-    ghost.ahead = true;
-    ghost.best = loadGhostBest();
-    ghost.recording = true;
-    ghost.active = !!(ghost.best && ghost.best.frames.length > 1);
-    if (ghost.active && !ghost.car) ghost.car = buildGhostCar();
-    if (ghost.car) ghost.car.visible = false;
-    ghost.rec.push([state.carX, state.carY]);  // 第 0 帧对齐 elapsed = 0
-  }
-
-  function ghostSaveRun() {
-    var score = Math.floor(state.score);
-    ghostStop();
-    var prev = ghost.best ? ghost.best.score : 0;
-    if (score <= prev || ghost.rec.length < 8) return;
-    var frames = [];
-    for (var i = 0; i < ghost.rec.length; i++) {
-      frames.push({
-        x: Math.round(ghost.rec[i][0] * 100) / 100,
-        y: Math.round(ghost.rec[i][1] * 100) / 100
-      });
-    }
-    try {
-      localStorage.setItem(GHOST_KEY, JSON.stringify({ score: score, frames: frames, rate: GHOST_RATE }));
-      ghost.best = { score: score, frames: ghost.rec.slice(), rate: GHOST_RATE };
-    } catch (e) { /* 配额满 / 隐私模式：静默忽略 */ }
-  }
-
-  function ghostRecordTick(dt) {
-    if (!ghost.recording) return;
-    if (ghost.rec.length >= GHOST_MAX_FRAMES) { ghost.recording = false; return; }
-    ghost.acc += dt;
-    if (ghost.acc < GHOST_RATE) return;
-    while (ghost.acc >= GHOST_RATE && ghost.rec.length < GHOST_MAX_FRAMES) {
-      ghost.acc -= GHOST_RATE;
-      ghost.rec.push([state.carX, state.carY]);
-    }
-    if (ghost.rec.length >= GHOST_MAX_FRAMES) ghost.recording = false;
-  }
-
-  function updateGhost(dt) {
-    if (!ghost.active || !ghost.best) {
-      if (ghost.car && ghost.car.visible) ghost.car.visible = false;
-      return;
-    }
-    if (!ghost.car) ghost.car = buildGhostCar();
-    var frames = ghost.best.frames;
-    var rate = ghost.best.rate || GHOST_RATE;
-    var idx = state.elapsed / rate - ghost.startIdx;
-    var i0 = Math.floor(idx);
-    if (i0 < 0 || i0 >= frames.length - 1) {
-      ghost.car.visible = false;
-      return;
-    }
-    var t = idx - i0;
-    var a = frames[i0], b = frames[i0 + 1];
-    ghost.car.visible = true;
-    ghost.car.position.set(
-      a[0] + (b[0] - a[0]) * t,
-      a[1] + (b[1] - a[1]) * t,
-      ghost.ahead ? GHOST_Z_AHEAD : GHOST_Z_BEHIND
-    );
-    ghost.car.rotation.set(0, 0, 0);
-    // 胜负关系：按“幽灵回放进度 × 幽灵最终分”对比当前分数（里程无法在回放里精确映射）
-    ghost.promptT -= dt;
-    if (ghost.promptT <= 0) {
-      ghost.promptT = GHOST_PROMPT_COOLDOWN;
-      var proj = ghost.best.score * ((i0 + t) / frames.length);
-      ghost.ahead = proj >= state.score;
-      showPopup('GHOST <b>' + (ghost.ahead ? 'AHEAD' : 'BEHIND') + '</b>');
-    }
-  }
-
   /* ---------- Boss 卡车 ---------- */
   var BOSS_FIRST_AT = 6000;
   var BOSS_SPAN = 10000;
@@ -5049,15 +4899,13 @@
     state.chaseT = 0;
   }
 
-  // 每帧调用（仅 playing）：录制/回放幽灵车 + Boss/追捕触发与计时
+  // 每帧调用（仅 playing）：Boss/追捕触发与计时
   function updateOpponents(dt) {
     // 自愈：Boss 对象被其他途径回收时清除标记，避免 HUD 卡住
     if (state.bossActive && (!boss.obj || (!boss.obj.userData.active && !boss.obj.userData.launch))) {
       state.bossActive = false;
       boss.obj = null;
     }
-    ghostRecordTick(dt);
-    updateGhost(dt);
     updateBossTrigger();
     updateChaseTrigger();
     updateChase(dt);
@@ -5189,13 +5037,6 @@
     downGlows.forEach(function (m) { m.scale.set(.001, .001, 1); });
     resetShockRings();
     syncReflection();
-    // 新一局从零开始录制，避免上一局帧混入本局回放
-    ghost.rec.length = 0;
-    ghost.acc = 0;
-    ghost.recording = false;
-    ghost.active = false;
-    ghost.startIdx = 0;
-    if (ghost.car) ghost.car.visible = false;
   }
 
   function startGame() {
@@ -5232,7 +5073,6 @@
     tunnel.visible = false;
     resetCameraAndCar();
     resetOpponents();
-    ghostStartRound();
     el.start.classList.add('hidden');
     el.over.classList.add('hidden');
     el.hint.style.opacity = '1';
@@ -5252,8 +5092,6 @@
     state.boosting = false;
     state.thrusting = false;
     state.crashTimer = 0;
-    // 撞车即终止本局幽灵回放与追捕
-    ghostStop();
     endChase(false);
              state.shake = 1.5;
     commentary('crash');
@@ -5279,7 +5117,6 @@
     state.mode = 'over';
     speechArmed = false;
     hardSilenceSpeech();
-    ghostSaveRun();
     var finalScore = Math.floor(state.score);
     var newRecord = finalScore > state.best;
     if (newRecord) {
@@ -7018,7 +6855,7 @@
         fps: Math.round(watchdog.fps), qualityDropped: watchdog.qualityDropped,
         weather: weather.current, rocketT: rocket.active ? +rocket.t.toFixed(2) : 0,
         skyroadActive: skyRoad.active, rocketActive: rocket.active,
-        ghost: ghost.active, bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2),
+        bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2),
         eventKind: trackEvent.kind, viewers: viewerNames.length,
         autoSaves: state.autoSaves || 0
       };
@@ -7050,23 +6887,6 @@
     spawnCone: function (lane, z) {
       if (state.mode !== 'playing') return false;
       spawnObstacle('cone', Math.max(0, Math.min(2, lane | 0)), typeof z === 'number' ? z : -30);
-      return true;
-    },
-    spawnGhost: function () {
-      if (state.mode !== 'playing') return false;
-      if (!ghost.best || ghost.best.frames.length < 2) {
-        // 无存档：用最近 30 秒的当前录制帧伪造一份，并从当前时间点开始播
-        var n = Math.min(ghost.rec.length, Math.round(30 / GHOST_RATE));
-        if (n < 2) return false;
-        var frames = [];
-        for (var gi = ghost.rec.length - n; gi < ghost.rec.length; gi++) frames.push(ghost.rec[gi].slice());
-        ghost.best = { score: Math.max(1, Math.floor(state.score)), frames: frames, rate: GHOST_RATE };
-      }
-      // 强制生成时从幽灵帧 0 开始播，不会因本局已跑很久而立刻消失
-      ghost.startIdx = state.elapsed / (ghost.best.rate || GHOST_RATE);
-      if (!ghost.car) ghost.car = buildGhostCar();
-      ghost.active = true;
-      ghost.promptT = 0;
       return true;
     },
     spawnBoss: function () { return spawnBoss(); },

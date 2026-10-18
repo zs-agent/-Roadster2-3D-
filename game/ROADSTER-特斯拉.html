@@ -5447,9 +5447,15 @@
       body = JSON.stringify(Object.assign({ type: type, ts: Date.now() }, data || {}));
     } catch (e) { return; }
     try {
+      // sendBeacon 不产生控制台网络错误，适合直播事件这种"发了就算"的上报
+      if (navigator.sendBeacon) {
+        var blob = new Blob([body], { type: 'text/plain;charset=UTF-8' });
+        navigator.sendBeacon('http://127.0.0.1:8790/event', blob);
+        return;
+      }
       fetch('http://127.0.0.1:8790/event', {
         method: 'POST', mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         body: body
       }).then(function () {
         streamSkipUntil = 0;
@@ -6622,6 +6628,7 @@
     snapshot: function () {
       return {
         mode: state.mode, score: state.score, speed: state.speed,
+        distance: Math.round(state.distance),
         carY: state.carY, grounded: state.grounded,
         ramCount: state.ramCount || 0, slamCount: state.slamCount || 0,
         shot: director.shot, slow: director.slowT > 0,

@@ -1888,7 +1888,12 @@
       tornado.base.rotation.z -= dt * 2;
       if (state.mode === 'playing') {
         if (Math.abs(state.carX - tornado.group.position.x) < 2.2 && Math.abs(tornado.group.position.z) < 3) {
-          triggerCrash({ position: { x: tornado.group.position.x, z: tornado.group.position.z } });
+          if (autoPilot) {
+            // 龙卷风：自动驾驶不撞车，换到最远的车道，换不动就给无敌帧
+            autoPilotAvoidX(tornado.group.position.x, 0.6);
+          } else {
+            triggerCrash({ position: { x: tornado.group.position.x, z: tornado.group.position.z } });
+          }
         }
         tornado.suckAcc += dt;
         if (tornado.suckAcc >= 0.12) { tornado.suckAcc = 0; suckNearTornado(); }
@@ -1950,7 +1955,12 @@
     if (trackEvent.t <= trackEvent.dur) {
       if (state.mode === 'playing' && Math.abs(collapse.mesh.position.z) < 2.5 &&
         Math.abs(state.carX - collapse.mesh.position.x) < 2.6) {
-        triggerCrash({ position: { x: collapse.mesh.position.x, z: collapse.mesh.position.z } });
+        if (autoPilot) {
+          // 路面塌陷：自动驾驶不撞车，绕开或给无敌帧
+          autoPilotAvoidX(collapse.mesh.position.x, 0.6);
+        } else {
+          triggerCrash({ position: { x: collapse.mesh.position.x, z: collapse.mesh.position.z } });
+        }
       }
     } else {
       var k = clamp((trackEvent.t - trackEvent.dur) / 0.4, 0, 1);
@@ -4287,7 +4297,9 @@
     bossActive: false,
     bossHp: 0,
     bossHpMax: 3,
-    chaseT: 0
+    chaseT: 0,
+    // 自动驾驶兜底次数（调试用）
+    autoSaves: 0
   };
 
   var bestDisplay = state.best;
@@ -4491,6 +4503,46 @@
     }
   }
 
+  /* ---------- 自动驾驶零失败兜底 ----------
+     任何本该撞车的分支都改走这里：静默、不掉速、不结束本局。
+     优先级顺序：Boss RAM > 车辆障碍 > 静物障碍 */
+  function autopilotSave(o) {
+    if (!o || !o.userData) return;
+    state.autoSaves = (state.autoSaves || 0) + 1;
+    // 1) Boss：视为一次 RAM（hitBoss 必须按住 boost 才算伤害，否则会判撞车）
+    if (o.userData.boss) {
+      heldInput.boost = true;
+      hitBoss(o);
+      return;
+    }
+    // 2) 警车追捕：不当障碍物，直接撞飞
+    if (o.userData.chaser) {
+      o.userData.chaser = false;
+      state.score += 120;
+      state.ramCount++;
+      state.shake = Math.max(state.shake, .32);
+      ramFx(o, false);
+      launchObstacle(o);
+      showPopup('AUTO SAVE <b>+120</b>');
+      return;
+    }
+    // 3) 车辆类障碍：抛飞 +120，不放慢
+    if (ramTypes[o.userData.type]) {
+      launchObstacle(o);
+      state.score += 120;
+      state.ramCount++;
+      state.shake = Math.max(state.shake, .3);
+      ramFx(o, true);
+      showPopup('AUTO SAVE <b>+120</b>');
+      return;
+    }
+    // 4) 锥桶 / 路障 / 石块：扫飞，短暂无敌帧看起来像擦身而过
+    launchObstacle(o);
+    if (o.userData.type === 'cone') state.score += 50;
+    state.rollIFrame = Math.max(state.rollIFrame, 0.4);
+    ramFx(o, false);
+  }
+
   function updateObstacles(dt, activeCheck) {
     updateLaunched(dt);
     for (var i = 0; i < obstacles.length; i++) {
@@ -4551,8 +4603,14 @@
                  var cleared = state.carY > (o.userData.height || 0.8) + 0.12;
          if (overlapsZ && dx < hitRange && !cleared && !state.rolling && state.rollIFrame <= 0) {
            // Boss / 警车走独立规则（与 demo / broadcast 模式一致，不被盾牌自动豁免）
-           if (o.userData.boss) { hitBoss(o); continue; }
-           if (o.userData.chaser) { hitChaser(o); continue; }
+           if (o.userData.boss) {
+             if (autoPilot && !demoMode) { autopilotSave(o); continue; }
+             hitBoss(o); continue;
+           }
+           if (o.userData.chaser) {
+             if (autoPilot && !demoMode) { autopilotSave(o); continue; }
+             hitChaser(o); continue;
+           }
            if (demoMode) {
              demoHits++;
              demoHitLog.push({ t: +demoT.toFixed(2), lane: state.lane, carX: +state.carX.toFixed(2), obsX: +o.position.x.toFixed(2), z: +o.position.z.toFixed(2), type: o.userData.type, y: +state.carY.toFixed(2) });
@@ -4619,6 +4677,9 @@
              sfxRam();
              streamEvent('ram', { score: Math.floor(state.score), count: state.ramCount });
              broadcastEvent('ram');
+           } else if (autoPilot) {
+             // 自动驾驶兜底：永不进入 crashing / over
+             autopilotSave(o);
            } else {
              triggerCrash(o);
            }
@@ -4867,8 +4928,10 @@
   function hitBoss(o) {
     if (state.mode !== 'playing') return;
     if (!(heldInput.boost || state.nitroTimer > 0)) {
-      triggerCrash(o);
-      return;
+      if (!autoPilot) { triggerCrash(o); return; }
+      // 自动驾驶：自动进入冲撞，绝不因没加速而撞死
+      heldInput.boost = true;
+      state.autoSaves = (state.autoSaves || 0) + 1;
     }
     o.userData.hp = Math.max(0, (o.userData.hp | 0) - 1);
     state.bossHp = o.userData.hp;
@@ -4954,6 +5017,14 @@
       sfxRam();
       streamEvent('chaserDown', { score: Math.floor(state.score), count: state.ramCount });
       broadcastEvent('ram');
+      return;
+    }
+    if (autoPilot) {
+      // 自动驾驶：警车贴身也只会被撞飞，不会结束比赛
+      o.userData.chaser = false;
+      launchObstacle(o);
+      state.autoSaves = (state.autoSaves || 0) + 1;
+      showPopup('AUTO SAVE');
       return;
     }
     triggerCrash(o);
@@ -5070,6 +5141,7 @@
     state.downLevel = 0;
     state.ramCount = 0;
     state.slamCount = 0;
+    state.autoSaves = 0;
     state.exhaustAcc = 0;
     director.snap = true;
     nextMilestone = 500;
@@ -5822,12 +5894,156 @@
     return score;
   }
 
+  /* ---------- 自动驾驶（直播无人值守）：主动躲避 + 零失败兜底 ----------
+     每帧只遍历一次 obstacles，不 new 任何对象；autopilotSave 在 updateObstacles 里兜底 */
+  var autoNear = [999, 999, 999];
+  var autoBoss = null;
+  var autoBossDist = 999;
+  var autoChaserClose = false;
+  var autoLaneCd = 0;
+
+  function autoScanLanes() {
+    autoNear[0] = autoNear[1] = autoNear[2] = 999;
+    autoBoss = null;
+    autoBossDist = 999;
+    autoChaserClose = false;
+    for (var i = 0; i < obstacles.length; i++) {
+      var o = obstacles[i];
+      var ud = o.userData;
+      if (!ud.active) continue;
+      var z = o.position.z;
+      // 后方来车不躲：警车从后面追上，靠加速拉开 / 直接撞飞
+      if (ud.chaser) {
+        if (z > -6) autoChaserClose = true;
+        continue;
+      }
+      if (z > 0 || z < -70) continue;   // 只看前方 70m
+      var d = -z;
+      if (ud.boss) {
+        if (d < autoBossDist) { autoBossDist = d; autoBoss = o; }
+        continue;
+      }
+      var idx = o.position.x > LANE_W * 0.5 ? 2 : (o.position.x < -LANE_W * 0.5 ? 0 : 1);
+      if (d < autoNear[idx]) autoNear[idx] = d;
+    }
+  }
+
+  // 只允许 ±1 的换道，带冷却，避免每帧抖动
+  function autoMoveLane(dir) {
+    if (!dir || autoLaneCd > 0) return false;
+    var next = state.lane + dir;
+    if (next < -1 || next > 1) return false;
+    state.lane = next;
+    autoLaneCd = 0.28;
+    return true;
+  }
+
+  // 事件危险源（龙卷风 / 路面塌陷）：换到离它最远的相邻车道，换不动就给无敌帧
+  function autoPilotAvoidX(px, iframe) {
+    if (!autoPilot || state.mode !== 'playing') return;
+    autoScanLanes();
+    var best = state.lane, bestScore = -1e9;
+    for (var l = 0; l < 3; l++) {
+      var laneVal = l - 1;
+      if (Math.abs(laneVal - state.lane) > 1) continue;
+      var dx = Math.abs(LANE_X[l] - px);
+      var s = dx * 10 - Math.min(autoNear[l], 60) * 0.3;
+      if (dx < 2.6) s -= 500;
+      if (s > bestScore) { bestScore = s; best = laneVal; }
+    }
+    if (best !== state.lane) {
+      state.lane = best;
+      autoLaneCd = Math.max(autoLaneCd, 0.15);
+      return;
+    }
+    state.rollIFrame = Math.max(state.rollIFrame, iframe || 0.6);
+  }
+
+  function updateAutoPilot(dt) {
+    if (!autoPilot || state.mode !== 'playing') return;
+    autoLaneCd = Math.max(0, autoLaneCd - dt);
+    if (state.air < 25) state.air = 25;
+    autoScanLanes();
+    var cur = state.lane + 1;
+
+    // 事件类危险（龙卷风 / 路面塌陷）：提前换道避开，换不动就靠无敌帧
+    if (trackEvent.kind === 'tornado' || trackEvent.kind === 'collapse') {
+      var evX = trackEvent.kind === 'tornado' ? tornado.group.position.x : collapse.mesh.position.x;
+      var evZ = trackEvent.kind === 'tornado' ? tornado.group.position.z : collapse.mesh.position.z;
+      if (evZ > -46 && evZ < 6) {
+        autoPilotAvoidX(evX, 0.6);
+        heldInput.thrust = false;
+        heldInput.dive = false;
+        heldInput.boost = false;
+        return;
+      }
+    }
+
+    var nearCur = autoNear[cur];
+    var wantBoost = false;
+    var wantThrust = demoT < demoFlightUntil;
+
+    if (autoBoss) {
+      // Boss 卡车：主动走位过去并按住 boost 去撞（走 RAM 伤害，不绕开）
+      var bl = autoBoss.position.x > LANE_W * 0.5 ? 2 : (autoBoss.position.x < -LANE_W * 0.5 ? 0 : 1);
+      if (bl !== cur) autoMoveLane(bl > cur ? 1 : -1);
+      wantBoost = true;
+    } else if (autoChaserClose) {
+      // 警车追上来了：不躲，加速拉开 / 撞飞
+      wantBoost = true;
+    } else if (nearCur < 45) {
+      // 主动躲避：在相邻车道里选「最近障碍最远」的一条（至少宽 10m 才值得换）
+      var dirBest = 0, farBest = nearCur + 10;
+      if (cur > 0 && autoNear[cur - 1] > farBest) { farBest = autoNear[cur - 1]; dirBest = -1; }
+      if (cur < 2 && autoNear[cur + 1] > farBest) { farBest = autoNear[cur + 1]; dirBest = 1; }
+      if (dirBest !== 0) {
+        autoMoveLane(dirBest);
+      } else if (nearCur < 18) {
+        // 三条道都被堵：优先起跳，否则加速硬撞（随后由兜底保鲜）
+        if (state.grounded && state.air > 8) {
+          jumpPressed = true;
+          demoFlightUntil = Math.max(demoFlightUntil, demoT + 0.85);
+          wantThrust = true;
+        } else {
+          wantBoost = true;
+        }
+      }
+    }
+
+    heldInput.thrust = wantThrust;
+    heldInput.dive = false;
+    heldInput.boost = wantBoost;
+  }
+
+  // 被包夹时才桶滚（无额外副作用，保持观感）
+  function autoPilotRoll() {
+    if (demoT <= demoNextRoll || state.rolling || state.air <= 14) return;
+    if (state.grounded && state.carY < 1.2) {
+      var cur = state.lane + 1;
+      var packed = autoNear[cur] < 18 &&
+        (cur <= 0 || autoNear[cur - 1] < 18) &&
+        (cur >= 2 || autoNear[cur + 1] < 18);
+      if (!packed) return;
+    }
+    var dir = state.lane <= -1 ? 1 : state.lane >= 1 ? -1 : (demoT % 2 > 1 ? 1 : -1);
+    startRoll(dir);
+    // 起跳/滞空时桶滚会落地，补一下滞空时间避免频繁触发
+    demoNextRoll = demoT + (autoPilot ? 24 + Math.random() * 8 : 14 + Math.random() * 6);
+  }
+
   function updateDemo(dt) {
     if ((!demoMode && !autoPilot) || state.mode !== 'playing') return;
     demoT += dt;
     demoDecisionT -= dt;
     autoFlightCooldown = Math.max(0, autoFlightCooldown - dt);
     if (autoPilot && state.air < 25) state.air = 25;
+
+    // 自动驾驶（非 demo）：走专用决策，不再走演示用的启发式
+    if (autoPilot && !demoMode) {
+      updateAutoPilot(dt);
+      autoPilotRoll();
+      return;
+    }
 
     heldInput.boost = demoMode && (demoT % 13) < 8.6;
     var cycle = demoT % 17.5;
@@ -6636,7 +6852,8 @@
         weather: weather.current, rocketT: rocket.active ? +rocket.t.toFixed(2) : 0,
         skyroadActive: skyRoad.active, rocketActive: rocket.active,
         ghost: ghost.active, bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2),
-        eventKind: trackEvent.kind, viewers: viewerNames.length
+        eventKind: trackEvent.kind, viewers: viewerNames.length,
+        autoSaves: state.autoSaves || 0
       };
     },
     setWeather: function (id) {

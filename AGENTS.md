@@ -4,29 +4,32 @@
 
 ## 当前状态
 
-- 产品：**Tesla Roadster II — NEON RUN**，单文件 Three.js 霓虹无尽赛车游戏。
-- 主文件 `game/roadster.html`（2277 行，HTML+CSS+JS 一体）。原始副本在 `D:\ORCA Workspace\computer use\roadster.html`，已确认与本仓库副本 md5 一致；**以本仓库为准**，原目录副本待用户确认后清理。
+- 产品：**Roadster 2 3D — Neon Run**，单文件 Three.js 高速竞速游戏（变道 + 起跳/长按飞行 + 桶滚 + 金币与道具）。
+- 主文件 **`game/ROADSTER-特斯拉.html`**（4653 行，HTML+CSS+JS 一体），md5 `dc4fcb28…` 与 `D:\ORCA Workspace\computer use\ROADSTER-特斯拉.html` 一致；**以本仓库为准**。
+- 历史：早期的 `roadster.html`（2277 行轻量版）已被此版本取代，仅留在 git 历史里，不要再改它。
 - 无构建步骤、无依赖安装：Three.js 0.128 走 CDN，字体走 Google Fonts，离线不可用。
 - 无测试框架；验证靠本地静态服务 + 浏览器冒烟。
 
-## 游戏结构（`game/roadster.html`）
+## 游戏结构（`game/ROADSTER-特斯拉.html`）
 
 | 区段 | 行号（约） | 内容 |
 |---|---|---|
-| CSS / HUD 样式 | 12–290 | 主题变量、开始屏、HUD、结算屏、响应式 |
-| 工具函数与状态 | 299–336 | `state`/`speed`/`distance`/`bonus`/`lane`/`best` 等全局 |
-| 渲染器与纹理 | 338–640 | `makeCanvas` 程序化纹理：沥青、霓虹广告、窗户、路面 |
-| 场景 | 642–1026 | 灯光、天空、星、建筑、护栏、灯柱、隧道、棕榈 |
-| 车模 | 1028–1470 | `loftGeometry` 车体、座舱、轮毂、灯、辉光 |
-| 障碍与生成 | 1471–1600 | 锥桶/路障/水泥墩，`spawnRow` 按难度调间隔 |
-| 粒子/尾迹 | 1668–1800 | 轮胎烟、火花、速度线 |
-| 音频 | 1817–1885 | WebAudio 程序化引擎声 + 撞击音，localStorage 记忆静音 |
-| HUD/流程 | 1884–1980 | 分数=距离×2+擦身奖励，结算、最高分 |
-| 输入 | 1981–1998 | 仅键盘：←/→ 或 A/D 换道，Enter/Space 开始，M 静音 |
-| 世界/物理/碰撞 | 2002–2215 | `updateWorld`、`updateCar`、`updateObstacles`（碰撞→`crashWith`）、速度递增 |
-| 主循环 | 2223–2277 | `animate` 逐帧调度 |
+| Helpers / 渲染器 | 473–592 | 工具函数、renderer、scene、camera |
+| 程序化纹理与环境 | 540–762 | canvas 纹理、PMREM 环境贴图、灯光、天空 |
+| 场景道具 | 763–1266 | 路面护栏、城市楼群、树、路灯、广告牌、龙门架、隧道、远山 |
+| 云层与天空门 | 1267–1322 | 高空云、光环门 |
+| 车模 | 1323–1818 | Roadster 车体、冷气推进器、灯组与接触阴影 |
+| 障碍 / 粒子 | 1819–2393 | 障碍物、自定义 Points 着色器粒子 |
+| 金币 / 道具 | 2394–2721 | 金币、道具拾取（含 NITRO） |
+| 状态与 UI | 2722–2944 | `state`、HUD 引用与刷新 |
+| 音频 | 2945–3316 | 引擎、推进器、拾取、撞击音效 |
+| 世界推进 / 生成 / 碰撞 | 3317–3547 | 路面滚动、障碍生成、碰撞判定 |
+| 流程 / 相机 | 3548–3760 | 开始、结算、重开、镜头 |
+| 飞行物理 / 车辆更新 | 3761–4246 | 起跳、长按飞行、桶滚、落地、车辆姿态 |
+| FX / 速度线 | 4247–4345 | 烟雾、速度线画布 |
+| 输入 / 初始化 / 主循环 | 4346–4653 | 键盘事件、`init`、逐帧 `loop` |
 
-当前没有：触屏/移动端操作、暂停、设置项、道具或加速、音效音乐、离线包。
+当前没有：触屏/移动端操作、暂停、BGM、离线包。
 
 ## 角色
 
@@ -93,17 +96,17 @@ orca terminal split --direction vertical --command "pi --name <任务名> @tmp/<
 
 ```bash
 "$USERPROFILE/.workbuddy/binaries/python/versions/3.13.12/python.exe" -m http.server 8321 --bind 127.0.0.1
-# http://127.0.0.1:8321/game/roadster.html
+# http://127.0.0.1:8321/game/ROADSTER-特斯拉.html
 ```
 
 必须重启/刷新页面后验证，浏览器缓存会掩盖改动。
 
 冒烟验收（每次改动后都要做，逐条给证据）：
 
-1. 打开页面，无 console error、无未捕获异常。
-2. 点击 START 后 HUD 出现，`#hud-distance` 随时间递增，速度读数上升。
-3. ←/→（或 A/D）换道生效，车辆位置随之改变。
-4. 撞障碍 → 结算屏出现，分数与最高分正确写入 `localStorage.roadster2_best`。
+1. 打开页面，无 console error、无未捕获异常，`title` 为 `Tesla Roadster — Neon Run`。
+2. 点击 `#startBtn` 后 `document.body.dataset.state` 变为 `playing`，`#distanceVal` 与 `#speedVal` 持续增长，`#scoreVal` 同步上升。
+3. ←/→ 变道生效；SPACE 起跳后 `#flightState` 由 `GROUND` 变为飞行态；Q/E 触发桶滚；F 切换自动驾驶按钮文案。
+4. 撞障碍 → `document.body.dataset.state` 依次为 `crashing` → `over`，结算屏出现，最高分写入 `localStorage['roadster-neon-best']`。
 5. 刷新后最高分保留。
 
 不要在未实际执行时声称"已验证"。

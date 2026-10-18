@@ -45,6 +45,22 @@
 - 不可用: `gh`、`op`，本会话无 github 工具 → **GitHub Issue/PR 自动维护暂未启用**，不要声称在后台运行
 - 模型网关: magpie（`D:\magpie\magpie.exe`，`http://127.0.0.1:3425/v1`）。网关未启动时 omp 报 `Couldn't connect to 127.0.0.1:3425`
 - `task.isolation.enabled=false` → 并行任务需手动 `git worktree`，且并行任务之间必须有明确的文件边界
+- 远端: `https://github.com/zs-agent/-Roadster2-3D-.git`，`main` 跟踪 `origin/main`。远端已有 README，push 前先 `git rebase origin/main`
+- 推送/合并：仅在用户明确授权后执行；本仓库用户已授权 push
+
+## 调用 pi 的强制规范
+
+**用户必须能实时看到 pi 的工作过程**，禁止静默后台执行（`pi -p` 只用于用户同意的纯查询类小任务）。
+
+标准方式：新建可见 Windows Terminal 窗口
+
+```bash
+cmd //c start "" wt -d "D:\\workspace2" cmd /k pi --name <任务名> "<初始提示词或 @brief 文件>"
+```
+
+- 任务简报先写到 `tmp/<task>.md`，用 `@tmp/<task>.md` 传入，避免长提示词转义问题。
+- 主 Agent 在窗口外验收：浏览器冒烟、`git diff`、语法检查，结论写回 `TASKS.md`。
+- 同一文件同一时间只允许一个 pi 会话改动。
 
 ## 标准循环
 

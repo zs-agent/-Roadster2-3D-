@@ -168,6 +168,15 @@
   }
   #flash.on{animation:flashOut .6s ease-out;}
   @keyframes flashOut{0%{opacity:.95;}100%{opacity:0;}}
+  #ramFlash{
+    position:absolute;inset:0;z-index:3;pointer-events:none;opacity:0;
+    background:radial-gradient(circle at 50% 60%, transparent 38%, rgba(120,225,255,.35) 70%, rgba(200,250,255,.85) 100%);
+    mix-blend-mode:screen;
+  }
+  #ramFlash.on{animation:ramFlashOut .38s ease-out;}
+  #ramFlash.slam{animation:ramSlamOut .55s ease-out;}
+  @keyframes ramFlashOut{0%{opacity:.9;}35%{opacity:.55;}100%{opacity:0;}}
+  @keyframes ramSlamOut{0%{opacity:1;}40%{opacity:.7;}100%{opacity:0;}}
 
   /* ---------- overlays ---------- */
   .overlay{
@@ -411,6 +420,7 @@
        <div id="castText">Lights out, and the Roadster is airborne!</div>
      </div>
      <div id="flash"></div>
+<div id="ramFlash"></div>
   </div>
 
   <div class="overlay" id="startScreen">
@@ -2166,6 +2176,39 @@
       o.rotation.z += L.dir * dt * 8;
       var k = Math.max(0.001, 1 - L.t / 1.1);
       o.scale.set(k, k, k);
+      // 拖尾：飞行中持续冒烟 + 泛火星，避免“瞬间消失”
+      if (L.t < 0.95) {
+        var ox = o.position.x, oy = o.position.y, oz = o.position.z;
+        for (var s = 0; s < 2; s++) {
+          var gg = 0.5 + Math.random() * 0.3;
+          smoke.emit(
+            ox + rnd(-0.35, 0.35), oy + 0.2 + rnd(0, 0.25), oz + rnd(-0.35, 0.35),
+            {
+              life: rnd(0.28, 0.55),
+              vx: rnd(-3.5, 3.5) + L.dir * 3.5,
+              vy: rnd(0.2, 1.6),
+              vz: rnd(-3, 3),
+              s0: rnd(0.16, 0.3),
+              s1: rnd(0.6, 1.3),
+              a0: rnd(0.1, 0.24),
+              r: gg, g: gg * 0.98, b: gg * 1.04
+            }
+          );
+        }
+        sparks.emit(
+          ox + rnd(-0.3, 0.3), oy + 0.25 + rnd(0, 0.3), oz + rnd(-0.3, 0.3),
+          {
+            life: rnd(0.2, 0.45),
+            vx: rnd(-4, 4) + L.dir * 5,
+            vy: rnd(0.5, 3.5),
+            vz: rnd(-2, 3),
+            s0: rnd(0.05, 0.12),
+            s1: rnd(0.02, 0.05),
+            a0: 0.85,
+            r: 1, g: 0.85, b: 0.55
+          }
+        );
+      }
       if (L.t > 1.1) {
         o.userData.killed = true;
         o.userData.launch = null;
@@ -2418,7 +2461,7 @@
       );
     }
     if (!state.grounded && state.thrusting) {
-      for (var d = 0; d < 4; d++) {
+      for (var d = 0; d < 6; d++) {
         var ds = Math.random() < 0.5 ? -1 : 1;
         exhaust.emit(
           state.carX + ds * 0.55,
@@ -2429,9 +2472,9 @@
             vx: rnd(-2.8, 2.8),
             vy: rnd(-9, -4),
             vz: rnd(2, 6),
-            s0: rnd(0.07, 0.16),
+            s0: rnd(0.1, 0.22),
             s1: rnd(0.2, 0.38),
-            a0: rnd(0.25, 0.55),
+            a0: rnd(0.42, 0.58),
             r: 0.3, g: 0.85, b: 1
           }
         );
@@ -2797,6 +2840,7 @@
     hint: document.getElementById('hint'),
     nearMiss: document.getElementById('nearMiss'),
     flash: document.getElementById('flash'),
+    ramFlash: document.getElementById('ramFlash'),
     menuBest: document.getElementById('menuBest'),
     ovDist: document.getElementById('ovDist'),
     ovScore: document.getElementById('ovScore'),
@@ -3313,7 +3357,8 @@
     rearLevel: 0,
     downLevel: 0,
     ramCount: 0,
-    slamCount: 0
+    slamCount: 0,
+    slamEchoTimer: 0
   };
 
   var bestDisplay = state.best;
@@ -3558,6 +3603,7 @@
              state.score += 50;
              state.ramCount++;
              state.shake = Math.max(state.shake, .22);
+             ramFx(o, false);
              showPopup('RAM <b>+50</b>');
              sfxRam();
            } else if ((heldInput.boost || state.nitroTimer > 0) && ramTypes[o.userData.type]) {
@@ -3567,6 +3613,7 @@
              state.ramCount++;
              state.shake = Math.max(state.shake, .5);
              state.speed *= 0.92;
+             ramFx(o, true);
              showPopup('RAM <b>+250</b>');
              sfxRam();
            } else {
@@ -3697,6 +3744,7 @@
     downPlumes.forEach(function (m) { m.visible = false; });
     rearGlows.forEach(function (m) { m.scale.set(.001, .001, 1); });
     downGlows.forEach(function (m) { m.scale.set(.001, .001, 1); });
+    resetShockRings();
     syncReflection();
   }
 
@@ -3860,6 +3908,133 @@
     }
   }
 
+  /* ---------- 冲击特效：冲击波环池 + 屏幕闪光 + 火花 ---------- */
+  var shockRings = [];
+  (function buildShockRings() {
+    var shockGeo = new THREE.RingGeometry(0.86, 1.0, 64);
+    shockGeo.rotateX(-Math.PI / 2);
+    for (var i = 0; i < 3; i++) {
+      var shockMat = new THREE.MeshBasicMaterial({
+        color: 0x9fe8ff,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false
+      });
+      var shock = new THREE.Mesh(shockGeo, shockMat);
+      shock.visible = false;
+      shock.frustumCulled = false;
+      shock.renderOrder = 2;
+      shock.userData.life = 0;
+      shock.userData.dur = 1;
+      shock.userData.maxR = 1;
+      shock.userData.t = 0;
+      scene.add(shock);
+      shockRings.push(shock);
+    }
+  })();
+
+  function spawnShock(x, y, z, hex, maxR, dur) {
+    for (var i = 0; i < shockRings.length; i++) {
+      var r = shockRings[i];
+      if (r.userData.life > 0) continue;
+      r.position.set(x, y, z);
+      r.material.color.setHex(hex);
+      r.material.opacity = 0.85;
+      r.scale.set(0.6, 1, 0.6);
+      r.visible = true;
+      r.userData.life = dur;
+      r.userData.dur = dur;
+      r.userData.maxR = maxR;
+      r.userData.t = 0;
+      return;
+    }
+  }
+
+  function updateShockRings(dt) {
+    for (var i = 0; i < shockRings.length; i++) {
+      var r = shockRings[i];
+      var u = r.userData;
+      if (u.life <= 0) continue;
+      u.t += dt;
+      u.life = u.dur - u.t;
+      if (u.life <= 0) {
+        u.life = 0;
+        r.visible = false;
+        r.material.opacity = 0;
+        continue;
+      }
+      var k = clamp(u.t / u.dur, 0, 1);
+      var s = 0.6 + k * u.maxR;
+      r.scale.set(s, 1, s);
+      r.material.opacity = (1 - k) * 0.85;
+    }
+  }
+
+  function resetShockRings() {
+    state.slamEchoTimer = 0;
+    for (var i = 0; i < shockRings.length; i++) {
+      var r = shockRings[i];
+      r.userData.life = 0;
+      r.userData.t = 0;
+      r.material.opacity = 0;
+      r.visible = false;
+    }
+  }
+
+  function flashScreen(kind) {
+    var f = el.ramFlash;
+    if (!f) return;
+    f.classList.remove('on');
+    f.classList.remove('slam');
+    void f.offsetWidth;
+    f.classList.add(kind === 'slam' ? 'slam' : 'on');
+  }
+
+  function impactSparks(x, y, z, n) {
+    for (var i = 0; i < n; i++) {
+      sparks.emit(
+        x + rnd(-0.4, 0.4), y + rnd(0, 0.4), z + rnd(-0.4, 0.4),
+        {
+          life: rnd(0.25, 0.6),
+          vx: rnd(-9, 9),
+          vy: rnd(1, 9),
+          vz: rnd(-3, 6),
+          s0: rnd(0.14, 0.3),
+          s1: rnd(0.04, 0.1),
+          a0: 1,
+          r: 1, g: 0.93, b: 0.72
+        }
+      );
+    }
+  }
+
+  function ramFx(o, strong) {
+    var p = o.position;
+    // 碰撞点固定在车头前方，避免冲击环被车身挡住
+    var fz = -1.6;
+    impactSparks(p.x, 0.25, fz, strong ? 44 : 16);
+    if (strong) {
+      emitSmoke(p.x, 0.35, fz, 7);
+      spawnShock(p.x, 0.08, fz, 0xffffff, 3.6, 0.35);
+      spawnShock(p.x, 0.06, fz, 0x2fc8ff, 8.5, 0.8);
+    } else {
+      spawnShock(p.x, 0.08, fz, 0x9fe8ff, 2.6, 0.35);
+    }
+    flashScreen(strong ? 'slam' : 'on');
+  }
+
+  function updateSlamEcho(dt) {
+    if (state.slamEchoTimer <= 0) return;
+    state.slamEchoTimer -= dt;
+    if (state.slamEchoTimer <= 0) {
+      state.slamEchoTimer = 0;
+      spawnShock(state.carX, 0.06, 0.4, 0x7fe4ff, 10, 0.7);
+    }
+  }
+
   function doSlam() {
     var n = 0, pts = 0;
     for (var i = obstacles.length - 1; i >= 0; i--) {
@@ -3877,11 +4052,15 @@
         state.score += 150;
         pts += 150;
         n++;
+        impactSparks(o.position.x, o.position.y + 0.3, o.position.z, 8);
       }
     }
     state.slamCount++;
     state.shake = Math.max(state.shake, .6);
-    landingBurst(30, 1.7);
+    landingBurst(48, 2.1);
+    spawnShock(state.carX, 0.06, 0.4, 0x7fe4ff, 7.5, 0.55);
+    state.slamEchoTimer = 0.12;
+    flashScreen('slam');
     if (n > 0) showPopup('SLAM <b>+' + pts + '</b>');
     sfxRam();
   }
@@ -4319,7 +4498,7 @@
     for (var d = 0; d < downPlumes.length; d++) {
       var dp = downPlumes[d];
       dp.visible = downOn;
-      dp.scale.set(.7 + dl * .45, .35 + dl * 1.15, .7 + dl * .45);
+      dp.scale.set(.85 + dl * .7, .5 + dl * 1.6, .85 + dl * .7);
       downGlows[d].scale.set(.001 + (.5 + dl * 1.05), .001 + (.5 + dl * 1.05), 1);
     }
     downPlumeMat.opacity = .30 * dl;
@@ -4634,6 +4813,8 @@
       }
 
             updateSmoke(dt);
+      updateShockRings(dt);
+      updateSlamEcho(dt);
       emitThrusterParticles(dt);
       tunnelLogic();
 
@@ -4652,6 +4833,8 @@
       updateCar(dt);
       updateCamera(dt);
       updateSmoke(dt);
+      updateShockRings(dt);
+      updateSlamEcho(dt);
       tunnelLogic();
       if (state.crashTimer > 1.65) showGameOver();
     } else {
@@ -4698,6 +4881,14 @@
     spawnCone: function (lane, z) {
       if (state.mode !== 'playing') return false;
       spawnObstacle('cone', Math.max(0, Math.min(2, lane | 0)), typeof z === 'number' ? z : -30);
+      return true;
+    },
+    demoRam: function () {
+      ramFx({ position: { x: state.carX, z: -3 } }, true);
+      return true;
+    },
+    demoSlam: function () {
+      doSlam();
       return true;
     }
   };

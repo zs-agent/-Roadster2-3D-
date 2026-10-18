@@ -162,6 +162,18 @@
     68%{opacity:1;}
     100%{opacity:0;transform:translate(-50%,-20px) scale(1.02);}
   }
+  /* Boss 血量条：顶部居中，与左右 HUD 面板、#hint 互不遮挡 */
+  #bossBar{
+    position:absolute;left:50%;top:18px;transform:translateX(-50%);
+    display:flex;align-items:center;gap:9px;
+    font-family:'Orbitron',monospace;font-size:10px;letter-spacing:.24em;
+    color:rgba(180,235,255,.82);padding:5px 13px;
+    border:1px solid rgba(110,225,255,.42);background:rgba(4,10,18,.42);
+    backdrop-filter:blur(8px);text-shadow:0 0 14px rgba(90,220,255,.5);
+    opacity:0;transition:opacity .22s ease;pointer-events:none;white-space:nowrap;
+  }
+  #bossBar.show{opacity:1;}
+  #bossBar b{color:#fff;font-weight:700;letter-spacing:.1em;}
   #flash{
     position:absolute;inset:0;pointer-events:none;opacity:0;
     background:radial-gradient(circle at 50% 62%, rgba(255,130,70,.9), rgba(255,45,20,.35) 42%, transparent 76%);
@@ -459,6 +471,7 @@
     <button id="autoToggle" class="auto-toggle" aria-pressed="false">
       <i></i><span>AUTOPILOT</span><b id="autoState">OFF</b>
     </button>
+    <div id="bossBar"><span>BOSS</span><b id="bossHp">3/3</b></div>
     <div id="nearMiss">NEAR MISS <b>+100</b></div>
      <div id="commentary">
        <div class="cast-kicker">LIVE BROADCAST <i id="castMeta">US FEED · SECTOR 07</i></div>
@@ -2490,6 +2503,8 @@
     mesh.userData.active = false;
     mesh.userData.prevZ = 0;
     mesh.userData.near = false;
+    // 记录原始碰撞宽度：Boss 会临时放大半宽，回收时靠这个值还原
+    mesh.userData.baseHalfW = mesh.userData.halfW;
     scene.add(mesh);
     obstaclePools[type].push(mesh);
     obstacles.push(mesh);
@@ -2516,6 +2531,14 @@
     obj.userData.active = true;
     obj.userData.near = false;
     obj.userData.killed = false;
+    // 回收复用时清掉上一轮的 Boss / 警车标记与放大后的碰撞宽度
+    obj.userData.boss = false;
+    obj.userData.hp = 0;
+    obj.userData.maxHp = 0;
+    obj.userData.chaser = false;
+    if (obj.userData.bossOutline) obj.userData.bossOutline.visible = false;
+    if (obj.userData.baseHalfW) obj.userData.halfW = obj.userData.baseHalfW;
+    obj.userData.laneIndex = Math.max(0, Math.min(2, lane | 0));
     obj.visible = true;
     obj.scale.set(1, 1, 1);
     obj.position.set(LANE_X[lane], 0, z);
@@ -2523,6 +2546,7 @@
     obj.userData.prevZ = z;
     // 抛飞回收的障碍被移出了 obstacles，重新上场时补回
     if (obstacles.indexOf(obj) < 0) obstacles.push(obj);
+    return obj;
   }
 
   /* 抛飞：标为非活跃并从 obstacles 移出（updateObstacles 末尾集中清理），
@@ -3213,6 +3237,8 @@
     boostGlow: document.getElementById('boostGlow'),
     hint: document.getElementById('hint'),
     nearMiss: document.getElementById('nearMiss'),
+    bossBar: document.getElementById('bossBar'),
+    bossHp: document.getElementById('bossHp'),
     flash: document.getElementById('flash'),
     ramFlash: document.getElementById('ramFlash'),
     menuBest: document.getElementById('menuBest'),
@@ -3807,11 +3833,17 @@
     downLevel: 0,
     ramCount: 0,
     slamCount: 0,
-    slamEchoTimer: 0
+    slamEchoTimer: 0,
+    // 对手层：Boss 卡车 / 警车追捕
+    bossActive: false,
+    bossHp: 0,
+    bossHpMax: 3,
+    chaseT: 0
   };
 
   var bestDisplay = state.best;
   var lastPowerHTML = '';
+  var bossBarShown = false;
 
   function bestLabels() {
     el.menuBest.textContent = Math.floor(state.best).toLocaleString('en-US');
@@ -3860,6 +3892,17 @@
       el.distance.innerHTML = fmtDist(state.distance);
       el.score.textContent = Math.floor(state.score).toLocaleString('en-US');
       el.best.textContent = Math.floor(Math.max(state.best, state.score)).toLocaleString('en-US');
+    }
+    // Boss 血量条
+    if (el.bossBar) {
+      var showBoss = state.mode === 'playing' && state.bossActive;
+      if (showBoss !== bossBarShown) {
+        bossBarShown = showBoss;
+        el.bossBar.classList.toggle('show', showBoss);
+      }
+      if (showBoss) {
+        el.bossHp.textContent = Math.max(0, state.bossHp) + '/' + state.bossHpMax;
+      }
     }
   }
 
@@ -4005,10 +4048,32 @@
       var o = obstacles[i];
       if (!o.userData.active) continue;
       var z0 = o.position.z;
-      o.position.z += state.speed * dt;
+      if (o.userData.chaser) {
+        // 警车：从后方逐渐赶上，并左右摆动逼近
+        o.position.z -= state.speed * dt * 0.12;
+        o.userData.chaserPhase += dt * 2.4;
+        o.position.x = LANE_X[o.userData.laneIndex] + Math.sin(o.userData.chaserPhase) * 0.85;
+      } else if (o.userData.boss) {
+        // Boss 卡车比车流慢，所以会被玩家追上
+        o.position.z += state.speed * dt * 0.72;
+      } else {
+        o.position.z += state.speed * dt;
+      }
       var z1 = o.position.z;
 
-      if (z1 > 16) {
+      if (z1 > 16 && !o.userData.chaser) {
+        if (o.userData.boss) {
+          state.bossActive = false;
+          boss.obj = null;
+          if (o.userData.bossOutline) o.userData.bossOutline.visible = false;
+        }
+        o.userData.active = false;
+        o.visible = false;
+        continue;
+      }
+      // 警车被玩家超到前面就回收，避免“警车跑到前方还继续追”
+      if (o.userData.chaser && z1 < -14) {
+        o.userData.chaser = false;
         o.userData.active = false;
         o.visible = false;
         continue;
@@ -4017,9 +4082,14 @@
       if (activeCheck && state.mode === 'playing') {
         var dx = Math.abs(o.position.x - state.carX);
         var hitRange = o.userData.halfW + 0.84;
-        var overlapsZ = z1 > -2.5 && z0 < 2.1;
+        var overlapsZ = o.userData.chaser
+          ? (z1 < 2.2 && z1 > -3.0)
+          : (o.userData.boss ? (z1 > -3.2 && z0 < 2.6) : (z1 > -2.5 && z0 < 2.1));
                  var cleared = state.carY > (o.userData.height || 0.8) + 0.12;
          if (overlapsZ && dx < hitRange && !cleared && !state.rolling && state.rollIFrame <= 0) {
+           // Boss / 警车走独立规则（与 demo / broadcast 模式一致，不被盾牌自动豁免）
+           if (o.userData.boss) { hitBoss(o); continue; }
+           if (o.userData.chaser) { hitChaser(o); continue; }
            if (demoMode) {
              demoHits++;
              demoHitLog.push({ t: +demoT.toFixed(2), lane: state.lane, carX: +state.carX.toFixed(2), obsX: +o.position.x.toFixed(2), z: +o.position.z.toFixed(2), type: o.userData.type, y: +state.carY.toFixed(2) });
@@ -4079,7 +4149,7 @@
            }
            continue;
          }
-        if (!o.userData.near && z1 > 2.1 && dx < 3.0 && dx > hitRange && state.carY < 1.1) {
+        if (!o.userData.near && !o.userData.chaser && !o.userData.boss && z1 > 2.1 && dx < 3.0 && dx > hitRange && state.carY < 1.1) {
           o.userData.near = true;
           addNearMiss();
         }
@@ -4093,6 +4163,351 @@
         if (obstacles[k].userData.launch) obstacles.splice(k, 1);
       }
     }
+  }
+
+  /* =========================================================
+     对手层 — 幽灵车（上一局回放）/ Boss 卡车 / 警车追捕
+     —— 全部复用已有车模与障碍池，逐帧只改位置，不新建对象
+  ========================================================= */
+
+  /* ---------- 幽灵车 ---------- */
+  var GHOST_KEY = 'roadster-neon-ghost';
+  var GHOST_RATE = 0.12;          // 每 0.12s 一帧
+  var GHOST_MAX_FRAMES = 8000;    // 约 16 分钟，超出停止录制
+  var GHOST_Z_AHEAD = -6.5;
+  var GHOST_Z_BEHIND = 6.5;
+  var GHOST_PROMPT_COOLDOWN = 6;
+
+  var ghost = {
+    best: null,      // { score, frames:[[x,y],...], rate } —— 上一局最佳回放
+    rec: [],         // 本局录制缓冲（[x, y]，保存时再转 {x,y} 并保留 2 位小数）
+    acc: 0,
+    recording: false,
+    car: null,       // 懒创建，整局复用
+    active: false,
+    startIdx: 0,     // 调试强制生成时的时间轴偏移
+    ahead: true,
+    promptT: 0
+  };
+
+  function loadGhostBest() {
+    try {
+      var raw = localStorage.getItem(GHOST_KEY);
+      if (!raw) return null;
+      var d = JSON.parse(raw);
+      if (!d || !d.frames || d.frames.length < 2) return null;
+      var frames = [];
+      for (var i = 0; i < d.frames.length; i++) {
+        var f = d.frames[i];
+        var fx = Array.isArray(f) ? f[0] : f.x;
+        var fy = Array.isArray(f) ? f[1] : f.y;
+        if (typeof fx !== 'number' || typeof fy !== 'number') continue;
+        frames.push([fx, fy]);
+      }
+      if (frames.length < 2) return null;
+      return { score: +d.score || 0, frames: frames, rate: d.rate > 0 ? d.rate : GHOST_RATE };
+    } catch (e) { return null; }
+  }
+
+  function buildGhostCar() {
+    var base = buildTrafficCar('sports');
+    var ghostMat = new THREE.MeshBasicMaterial({
+      color: 0x6fe8ff, transparent: true, opacity: .28, wireframe: false, depthWrite: false
+    });
+    var wireMat = new THREE.MeshBasicMaterial({
+      color: 0x6fe8ff, transparent: true, opacity: .35, wireframe: true, depthWrite: false
+    });
+    var root = new THREE.Group();
+    for (var pass = 0; pass < 2; pass++) {
+      var clone = base.clone();
+      var mat = pass === 0 ? ghostMat : wireMat;
+      clone.traverse(function (n) {
+        if (n.isMesh) {
+          n.material = mat;
+          n.castShadow = false;
+          n.receiveShadow = false;
+        } else if (n.isSprite) {
+          n.visible = false;
+        }
+      });
+      root.add(clone);
+    }
+    root.visible = false;
+    scene.add(root);
+    return root;
+  }
+
+  function ghostStop() {
+    ghost.recording = false;
+    ghost.active = false;
+    if (ghost.car) ghost.car.visible = false;
+  }
+
+  function ghostStartRound() {
+    ghost.rec.length = 0;
+    ghost.acc = 0;
+    ghost.promptT = 0;
+    ghost.startIdx = 0;
+    ghost.ahead = true;
+    ghost.best = loadGhostBest();
+    ghost.recording = true;
+    ghost.active = !!(ghost.best && ghost.best.frames.length > 1);
+    if (ghost.active && !ghost.car) ghost.car = buildGhostCar();
+    if (ghost.car) ghost.car.visible = false;
+    ghost.rec.push([state.carX, state.carY]);  // 第 0 帧对齐 elapsed = 0
+  }
+
+  function ghostSaveRun() {
+    var score = Math.floor(state.score);
+    ghostStop();
+    var prev = ghost.best ? ghost.best.score : 0;
+    if (score <= prev || ghost.rec.length < 8) return;
+    var frames = [];
+    for (var i = 0; i < ghost.rec.length; i++) {
+      frames.push({
+        x: Math.round(ghost.rec[i][0] * 100) / 100,
+        y: Math.round(ghost.rec[i][1] * 100) / 100
+      });
+    }
+    try {
+      localStorage.setItem(GHOST_KEY, JSON.stringify({ score: score, frames: frames, rate: GHOST_RATE }));
+      ghost.best = { score: score, frames: ghost.rec.slice(), rate: GHOST_RATE };
+    } catch (e) { /* 配额满 / 隐私模式：静默忽略 */ }
+  }
+
+  function ghostRecordTick(dt) {
+    if (!ghost.recording) return;
+    if (ghost.rec.length >= GHOST_MAX_FRAMES) { ghost.recording = false; return; }
+    ghost.acc += dt;
+    if (ghost.acc < GHOST_RATE) return;
+    while (ghost.acc >= GHOST_RATE && ghost.rec.length < GHOST_MAX_FRAMES) {
+      ghost.acc -= GHOST_RATE;
+      ghost.rec.push([state.carX, state.carY]);
+    }
+    if (ghost.rec.length >= GHOST_MAX_FRAMES) ghost.recording = false;
+  }
+
+  function updateGhost(dt) {
+    if (!ghost.active || !ghost.best) {
+      if (ghost.car && ghost.car.visible) ghost.car.visible = false;
+      return;
+    }
+    if (!ghost.car) ghost.car = buildGhostCar();
+    var frames = ghost.best.frames;
+    var rate = ghost.best.rate || GHOST_RATE;
+    var idx = state.elapsed / rate - ghost.startIdx;
+    var i0 = Math.floor(idx);
+    if (i0 < 0 || i0 >= frames.length - 1) {
+      ghost.car.visible = false;
+      return;
+    }
+    var t = idx - i0;
+    var a = frames[i0], b = frames[i0 + 1];
+    ghost.car.visible = true;
+    ghost.car.position.set(
+      a[0] + (b[0] - a[0]) * t,
+      a[1] + (b[1] - a[1]) * t,
+      ghost.ahead ? GHOST_Z_AHEAD : GHOST_Z_BEHIND
+    );
+    ghost.car.rotation.set(0, 0, 0);
+    // 胜负关系：按“幽灵回放进度 × 幽灵最终分”对比当前分数（里程无法在回放里精确映射）
+    ghost.promptT -= dt;
+    if (ghost.promptT <= 0) {
+      ghost.promptT = GHOST_PROMPT_COOLDOWN;
+      var proj = ghost.best.score * ((i0 + t) / frames.length);
+      ghost.ahead = proj >= state.score;
+      showPopup('GHOST <b>' + (ghost.ahead ? 'AHEAD' : 'BEHIND') + '</b>');
+    }
+  }
+
+  /* ---------- Boss 卡车 ---------- */
+  var BOSS_FIRST_AT = 6000;
+  var BOSS_SPAN = 10000;
+  var boss = { nextAt: BOSS_FIRST_AT, obj: null };
+
+  // 红色描边：每个 truck 池对象只建一次 EdgesGeometry 线框，复用时开关 visible
+  function ensureBossOutline(o) {
+    if (o.userData.bossOutline) { o.userData.bossOutline.visible = true; return; }
+    var geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(2.5, 2.94, 6.9));
+    geo.translate(0, 1.5, 0.1);
+    var line = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      color: 0xff2fa8, transparent: true, opacity: .9, depthWrite: false
+    }));
+    o.add(line);
+    o.userData.bossOutline = line;
+  }
+
+  function spawnBoss() {
+    if (state.mode !== 'playing') return false;
+    if (state.bossActive && boss.obj && boss.obj.userData.active) return false;
+    var lane = Math.random() < .5 ? 0 : 2;
+    var o = spawnObstacle('truck', lane, -115);
+    if (!o) return false;
+    o.userData.boss = true;
+    o.userData.hp = 3;
+    o.userData.maxHp = 3;
+    o.scale.set(1.55, 1.25, 1.35);
+    o.userData.halfW = (o.userData.baseHalfW || 1.22) * 1.55;
+    ensureBossOutline(o);
+    boss.obj = o;
+    state.bossActive = true;
+    state.bossHp = 3;
+    state.bossHpMax = 3;
+    showPopup('BOSS <b>TRUCK · 3 HIT</b>');
+    streamEvent('bossSpawn', { hp: 3, distance: Math.floor(state.distance) });
+    return true;
+  }
+
+  function updateBossTrigger() {
+    if (state.distance < boss.nextAt) return;
+    while (state.distance >= boss.nextAt) boss.nextAt += BOSS_SPAN;
+    spawnBoss();
+  }
+
+  function bossDown(o) {
+    state.bossActive = false;
+    boss.obj = null;
+    if (o.userData.bossOutline) o.userData.bossOutline.visible = false;
+    state.score += 5000;
+    state.shake = Math.max(state.shake, 1.0);
+    var bx = o.position.x;
+    impactSparks(bx, 0.9, -1.6, 60);
+    spawnShock(bx, 0.1, -1.6, 0xffffff, 6.5, 0.55);
+    spawnShock(bx, 0.06, -1.6, 0xff2fa8, 13, 1.0);
+    emitSmoke(bx, 0.5, -1.6, 20);
+    flashScreen('slam');
+    o.scale.set(1, 1, 1);   // 先还原比例，抛飞动画才不会突缩
+    launchObstacle(o);
+    showPopup('BOSS DOWN <b>+5000</b>');
+    sfxGate();
+    streamEvent('boss', { score: Math.floor(state.score), distance: Math.floor(state.distance) });
+    broadcastEvent('ram');
+  }
+
+  function hitBoss(o) {
+    if (state.mode !== 'playing') return;
+    if (!(heldInput.boost || state.nitroTimer > 0)) {
+      triggerCrash(o);
+      return;
+    }
+    o.userData.hp = Math.max(0, (o.userData.hp | 0) - 1);
+    state.bossHp = o.userData.hp;
+    state.score += 1000;
+    state.shake = Math.max(state.shake, .62);
+    ramFx(o, true);
+    sfxRam();
+    if (o.userData.hp > 0) {
+      o.position.z -= 6;            // 被顶开
+      o.userData.prevZ = o.position.z;
+      showPopup('BOSS HIT <b>' + o.userData.hp + '/' + o.userData.maxHp + '</b>');
+      streamEvent('bossHit', { hp: o.userData.hp, score: Math.floor(state.score) });
+      return;
+    }
+    bossDown(o);
+  }
+
+  /* ---------- 警车追捕 ---------- */
+  var CHASE_FIRST_AT = 4500;
+  var CHASE_SPAN = 4500;
+  var CHASE_DURATION = 20;
+  var chase = { nextAt: CHASE_FIRST_AT, cars: [] };
+
+  function startChase() {
+    if (state.mode !== 'playing') return false;
+    if (state.chaseT > 0) return false;
+    chase.cars.length = 0;
+    var a = (Math.random() * 3) | 0;
+    var b = (a + 1 + ((Math.random() * 2) | 0)) % 3;
+    var lanesAt = [a, b];
+    var zAt = [14, 22];   // 都在玩家后方（相机之后），逐渐追上来
+    for (var i = 0; i < 2; i++) {
+      var o = spawnObstacle('police', lanesAt[i], zAt[i]);
+      if (!o) continue;
+      o.userData.chaser = true;
+      o.userData.chaserPhase = Math.random() * TAU;
+      chase.cars.push(o);
+    }
+    if (!chase.cars.length) return false;
+    state.chaseT = CHASE_DURATION;
+    showPopup('POLICE CHASE <b>' + CHASE_DURATION + 's</b>');
+    streamEvent('chase', { duration: CHASE_DURATION, distance: Math.floor(state.distance) });
+    return true;
+  }
+
+  function endChase(escaped) {
+    for (var i = 0; i < chase.cars.length; i++) {
+      var c = chase.cars[i];
+      if (c.userData.launch) continue;   // 正在抛飞的警车交给 launch 动画收尾
+      c.userData.chaser = false;
+      c.userData.active = false;
+      c.visible = false;
+    }
+    chase.cars.length = 0;
+    state.chaseT = 0;
+    if (escaped && state.mode === 'playing') {
+      showPopup('CHASE <b>ESCAPED</b>');
+      streamEvent('chaseEnd', { score: Math.floor(state.score), distance: Math.floor(state.distance) });
+    }
+  }
+
+  function updateChase(dt) {
+    if (state.chaseT > 0) {
+      state.chaseT -= dt;
+      if (state.chaseT <= 0) endChase(true);
+    }
+    for (var i = chase.cars.length - 1; i >= 0; i--) {
+      var c = chase.cars[i];
+      if (!c.userData.chaser || (!c.userData.active && !c.userData.launch)) chase.cars.splice(i, 1);
+    }
+  }
+
+  function hitChaser(o) {
+    if (state.mode !== 'playing') return;
+    if (heldInput.boost || state.nitroTimer > 0) {
+      o.userData.chaser = false;
+      state.score += 800;
+      state.ramCount++;
+      state.shake = Math.max(state.shake, .5);
+      ramFx(o, true);
+      launchObstacle(o);
+      showPopup('POLICE RAM <b>+800</b>');
+      sfxRam();
+      streamEvent('chaserDown', { score: Math.floor(state.score), count: state.ramCount });
+      broadcastEvent('ram');
+      return;
+    }
+    triggerCrash(o);
+  }
+
+  function updateChaseTrigger() {
+    if (state.distance < chase.nextAt) return;
+    while (state.distance >= chase.nextAt) chase.nextAt += CHASE_SPAN;
+    startChase();
+  }
+
+  function resetOpponents() {
+    boss.nextAt = BOSS_FIRST_AT;
+    boss.obj = null;
+    state.bossActive = false;
+    state.bossHp = 0;
+    state.bossHpMax = 3;
+    chase.nextAt = CHASE_FIRST_AT;
+    chase.cars.length = 0;
+    state.chaseT = 0;
+  }
+
+  // 每帧调用（仅 playing）：录制/回放幽灵车 + Boss/追捕触发与计时
+  function updateOpponents(dt) {
+    // 自愈：Boss 对象被其他途径回收时清除标记，避免 HUD 卡住
+    if (state.bossActive && (!boss.obj || (!boss.obj.userData.active && !boss.obj.userData.launch))) {
+      state.bossActive = false;
+      boss.obj = null;
+    }
+    ghostRecordTick(dt);
+    updateGhost(dt);
+    updateBossTrigger();
+    updateChaseTrigger();
+    updateChase(dt);
   }
 
   function showPopup(html) {
@@ -4220,6 +4635,13 @@
     downGlows.forEach(function (m) { m.scale.set(.001, .001, 1); });
     resetShockRings();
     syncReflection();
+    // 新一局从零开始录制，避免上一局帧混入本局回放
+    ghost.rec.length = 0;
+    ghost.acc = 0;
+    ghost.recording = false;
+    ghost.active = false;
+    ghost.startIdx = 0;
+    if (ghost.car) ghost.car.visible = false;
   }
 
   function startGame() {
@@ -4255,6 +4677,8 @@
     tunnelState.active = false;
     tunnel.visible = false;
     resetCameraAndCar();
+    resetOpponents();
+    ghostStartRound();
     el.start.classList.add('hidden');
     el.over.classList.add('hidden');
     el.hint.style.opacity = '1';
@@ -4274,6 +4698,9 @@
     state.boosting = false;
     state.thrusting = false;
     state.crashTimer = 0;
+    // 撞车即终止本局幽灵回放与追捕
+    ghostStop();
+    endChase(false);
              state.shake = 1.5;
     commentary('crash');
     sfxCrash();
@@ -4298,6 +4725,7 @@
     state.mode = 'over';
     speechArmed = false;
     hardSilenceSpeech();
+    ghostSaveRun();
     var finalScore = Math.floor(state.score);
     var newRecord = finalScore > state.best;
     if (newRecord) {
@@ -4826,6 +5254,7 @@
     for (var i = obstacles.length - 1; i >= 0; i--) {
       var o = obstacles[i];
       if (!o.userData.active) continue;
+      if (o.userData.boss || o.userData.chaser) continue;  // Boss / 警车不吃砸地 AOE，只能飚或 RAM
       if (Math.abs(o.position.z) >= 6) continue;
       if (Math.abs(o.position.x - state.carX) >= 4) continue;
       if (o.userData.type === 'cone') {
@@ -5642,6 +6071,7 @@
                    advanceWorld(dt, state.speed);
        updateSkyGates();
        updateSkyRoad();
+       updateOpponents(dt);
        updateObstacles(dt, true);
        updateDemo(dt);
        updateFlight(dt);
@@ -5716,7 +6146,8 @@
         shot: director.shot, slow: director.slowT > 0,
         broadcastMode: broadcastMode, replayActive: replay.active,
         weather: weather.current, rocketT: rocket.active ? +rocket.t.toFixed(2) : 0,
-        skyroadActive: skyRoad.active, rocketActive: rocket.active
+        skyroadActive: skyRoad.active, rocketActive: rocket.active,
+        ghost: ghost.active, bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2)
       };
     },
     setWeather: function (id) {
@@ -5748,6 +6179,25 @@
       spawnObstacle('cone', Math.max(0, Math.min(2, lane | 0)), typeof z === 'number' ? z : -30);
       return true;
     },
+    spawnGhost: function () {
+      if (state.mode !== 'playing') return false;
+      if (!ghost.best || ghost.best.frames.length < 2) {
+        // 无存档：用最近 30 秒的当前录制帧伪造一份，并从当前时间点开始播
+        var n = Math.min(ghost.rec.length, Math.round(30 / GHOST_RATE));
+        if (n < 2) return false;
+        var frames = [];
+        for (var gi = ghost.rec.length - n; gi < ghost.rec.length; gi++) frames.push(ghost.rec[gi].slice());
+        ghost.best = { score: Math.max(1, Math.floor(state.score)), frames: frames, rate: GHOST_RATE };
+      }
+      // 强制生成时从幽灵帧 0 开始播，不会因本局已跑很久而立刻消失
+      ghost.startIdx = state.elapsed / (ghost.best.rate || GHOST_RATE);
+      if (!ghost.car) ghost.car = buildGhostCar();
+      ghost.active = true;
+      ghost.promptT = 0;
+      return true;
+    },
+    spawnBoss: function () { return spawnBoss(); },
+    startChase: function () { return startChase(); },
     demoRam: function () {
       ramFx({ position: { x: state.carX, z: -3 } }, true);
       return true;

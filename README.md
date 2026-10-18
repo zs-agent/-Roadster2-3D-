@@ -9,6 +9,8 @@
 - **进攻**：加速中撞上车辆把它直接撞飞（RAM +250）；锥桶任何速度都能撞飞（+50）；空中按 ↓ 俯冲落地（SLAM）砸飞周围车辆（每辆 +150）。路障和水泥墩撞了照样结束。
 - 距离、当前分、金币、个人最高分在 HUD 实时显示。
 - 内置自动驾驶（AUTOPILOT）演示模式。
+- **直播模式**：`?director=1` 或按 F 开自动驾驶后自动启用导播——6 机位自动切换、RAM/SLAM 慢放、高光回放、中英双语字幕。
+- **内容事件**：5 种天气每 1500m 过渡切换；每 1400m 一条 8 连天路光环；每 5km 一次 18 秒火箭段（低重力、星空、无障碍）。
 - 最高分存浏览器 `localStorage`。
 
 ## 操作
@@ -32,10 +34,23 @@ python -m http.server 8321 --bind 127.0.0.1
 
 直接双击 `game/ROADSTER-特斯拉.html` 也能玩，但 Three.js 与字体走 CDN，需要联网。
 
+## 直播
+
+```bash
+node stream/server.mjs        # 事件服务 + 静态服务，127.0.0.1:8790
+```
+
+- 游戏画面：`http://127.0.0.1:8790/game/ROADSTER-特斯拉.html?director=1`
+- OBS 浏览器源：`http://127.0.0.1:8790/overlay.html`（1920×1080，透明背景）
+- overlay 显示里程/分数/金币/速度与最近事件；离开本地服务时游戏会自动跳过事件上报，不影响游玩。
+
 ## 目录
 
 ```
-game/ROADSTER-特斯拉.html   游戏本体（HTML + CSS + JS 一体，4653 行）
+game/ROADSTER-特斯拉.html   游戏本体（HTML + CSS + JS 一体）
+stream/server.mjs           零依赖 SSE 事件服务 + 静态服务
+stream/overlay.html         OBS 叠加层（透明）
+stream/README.md            启动与 OBS 配置
 AGENTS.md                   协作契约：角色、环境、开发循环、验收命令
 TASKS.md                    任务队列与已知问题
 ```

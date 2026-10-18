@@ -109,5 +109,8 @@ orca terminal split --direction vertical --command "pi --name <任务名> @tmp/<
 4. 撞障碍 → `document.body.dataset.state` 依次为 `crashing` → `over`，结算屏出现，最高分写入 `localStorage['roadster-neon-best']`。
 5. 刷新后最高分保留。
 6. 进攻手段：`__ROADSTER_DEBUG.spawnCar(1, -16)` + 按住 W → `ramCount` 递增、`mode` 仍为 `playing`；不按 W 撞同一辆车 → `mode` 变 `crashing`。`spawnCone(1, -14)` 任何速度都撞飞。跳跃后按住 S/↓ 落地 → `slamCount` 递增。
+7. 直播模式：`?director=1` 时 `snapshot().broadcastMode === true`，`setShot(name)` 能切换机位；真实 RAM 触发 `slow=true`、`replayActive=true` 且 `#replayVideo.src` 为 blob；`#subtitle` 有中文文案。
+8. 天气/事件：`setWeather('neonRain'|'sandstorm'|'day')` 画面与雾切换；`spawnSkyRoad()` 生成光环链；`startRocket()` 后 `rocketActive=true`、`carY` 上升到 10m 以上。
+9. overlay：`node stream/server.mjs` 后 POST `/event` 能出现在 `overlay.html` 事件条，游戏内 RAM 事件能实时同步。
 
 不要在未实际执行时声称"已验证"。

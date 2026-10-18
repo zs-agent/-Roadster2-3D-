@@ -52,15 +52,18 @@
 
 **用户必须能实时看到 pi 的工作过程**，禁止静默后台执行（`pi -p` 只用于用户同意的纯查询类小任务）。
 
-标准方式：新建可见 Windows Terminal 窗口
+标准方式：在当前 Orca 标签页**右侧分栏**开 pi（用户实时可见）
 
 ```bash
-cmd //c start "" wt -d "D:\\workspace2" cmd /k pi --name <任务名> "<初始提示词或 @brief 文件>"
+orca terminal split --direction vertical --command "pi --name <任务名> @tmp/<brief>.md"
 ```
 
-- 任务简报先写到 `tmp/<task>.md`，用 `@tmp/<task>.md` 传入，避免长提示词转义问题。
-- 主 Agent 在窗口外验收：浏览器冒烟、`git diff`、语法检查，结论写回 `TASKS.md`。
+- 任务简报先写到 `tmp/<task>.md`，用 `@tmp/<brief>.md` 传入，避免长提示词转义问题。
+- 主 Agent 跟进：`orca terminal read --terminal <handle> --screen`，或直接看右侧面板。
+- 收尾：`orca terminal close --terminal <handle>` 关掉该面板；开新任务前先关旧面板，避免右侧堆叠。
+- 主 Agent 在面板外验收：浏览器冒烟、`git diff`、语法检查，结论写回 `TASKS.md`。
 - 同一文件同一时间只允许一个 pi 会话改动。
+- 不要再用独立 Windows Terminal 窗口（`wt`）或静默 `pi -p`；已实测 `--direction vertical` 即出现在右侧。
 
 ## 标准循环
 

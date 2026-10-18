@@ -1711,6 +1711,435 @@
     rocket.blend = 0;
     rocket.nextAt = ROCKET_SPAN;
     if (rocketVignetteEl) rocketVignetteEl.classList.remove('on');
+    resetTrackEvents();
+    resetViewerPlates();
+  }
+
+  /* =========================================================
+     赛道突发事件：UFO 空投 / 龙卷风 / 路面塌陷
+     —— 每 2500–3500m 触发一次，同一时间只允许一个；
+        所有网格在初始化时建好，运行时只改 visible / 参数
+  ========================================================= */
+  var trackEvent = { kind: null, t: 0, dur: 0, nextAt: rnd(2500, 3500) };
+
+  /* ---------- UFO ---------- */
+  var ufo = {
+    group: null, ringMat: null, bellyMat: null, glow: null,
+    dropAt: [0, 0], dropped: [false, false], lanes: [0, 1]
+  };
+  (function buildUfo() {
+    var g = new THREE.Group();
+    var body = new THREE.Mesh(
+      new THREE.CylinderGeometry(3.0, 2.0, 0.55, 36),
+      new THREE.MeshStandardMaterial({
+        color: 0x2a3340, metalness: .9, roughness: .3,
+        emissive: 0x0a1620, envMap: envMap, envMapIntensity: .8
+      })
+    );
+    var dome = new THREE.Mesh(
+      new THREE.SphereGeometry(1.35, 24, 14, 0, TAU, 0, Math.PI / 2),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x9fe8ff, transparent: true, opacity: .5, metalness: .2,
+        roughness: .08, emissive: 0x2fc8ff, emissiveIntensity: .8
+      })
+    );
+    dome.position.y = .24;
+    ufo.ringMat = new THREE.MeshBasicMaterial({
+      color: 0x57e6ff, transparent: true, opacity: .95,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false
+    });
+    var ring = new THREE.Mesh(new THREE.TorusGeometry(3.15, .1, 8, 48), ufo.ringMat);
+    ring.rotation.x = Math.PI / 2;
+    ufo.bellyMat = new THREE.MeshBasicMaterial({
+      color: 0xffb347, transparent: true, opacity: .8,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false
+    });
+    var belly = new THREE.Mesh(new THREE.CircleGeometry(1.05, 28), ufo.bellyMat);
+    belly.rotation.x = Math.PI / 2;
+    belly.position.y = -.3;
+    ufo.glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: 0x57e6ff, transparent: true, opacity: .5,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false
+    }));
+    ufo.glow.scale.set(9, 9, 1);
+    g.add(body, dome, ring, belly, ufo.glow);
+    g.visible = false;
+    scene.add(g);
+    ufo.group = g;
+  })();
+
+  function startUfo() {
+    ufo.group.visible = true;
+    ufo.group.position.set(-38, 15, -38);
+    ufo.group.rotation.set(0, 0, 0);
+    ufo.group.scale.setScalar(1);
+    ufo.dropAt = [0.9, 1.7];
+    ufo.dropped = [false, false];
+    var a = (Math.random() * 3) | 0;
+    ufo.lanes = [a, (a + 1 + ((Math.random() * 2) | 0)) % 3];
+    showPopup('UFO <b>DROP INBOUND</b>');
+    streamEvent('trackEvent', { kind: 'ufo' });
+  }
+
+  function dropTrackObstacle(lane, type) {
+    var o = spawnObstacle(type, lane, -40);
+    if (!o) return;
+    o.userData.drop = { t: 0, dur: 0.8, y0: 18 };
+    o.position.y = 18;
+    o.position.z = -40;
+    o.userData.prevZ = -40;
+  }
+
+  function dropLandFx(o) {
+    var x = o.position.x, z = o.position.z;
+    impactSparks(x, 0.18, z, 14);
+    spawnShock(x, 0.06, z, 0x9fe8ff, 3.6, 0.45);
+    emitSmoke(x, 0.25, z, 4);
+    state.shake = Math.max(state.shake, 0.18);
+  }
+
+  function updateUfo() {
+    var t = trackEvent.t, d = trackEvent.dur;
+    var k = clamp(t / d, 0, 1);
+    ufo.group.position.set(-38 + 76 * k, 15 - 5 * k + Math.sin(t * 3) * 0.4, -38);
+    ufo.group.rotation.y = Math.sin(t * 2.5) * 0.25;
+    ufo.group.rotation.z = Math.sin(t * 1.7) * 0.12;
+    ufo.ringMat.opacity = 0.55 + Math.sin(state.t * 8) * 0.3;
+    ufo.bellyMat.opacity = 0.5 + Math.sin(state.t * 11) * 0.35;
+    for (var i = 0; i < 2; i++) {
+      if (ufo.dropped[i] || t < ufo.dropAt[i]) continue;
+      ufo.dropped[i] = true;
+      dropTrackObstacle(ufo.lanes[i], i === 0 ? 'block' : 'barrier');
+    }
+    if (t >= d) ufo.group.visible = false;
+  }
+
+  /* ---------- 龙卷风（120 点粒子漏斗） ---------- */
+  var tornado = { group: null, points: null, base: null, baseMat: null, suckAcc: 0, phase: 0 };
+  (function buildTornado() {
+    var COUNT = 120;
+    var pos = new Float32Array(COUNT * 3);
+    for (var i = 0; i < COUNT; i++) {
+      var h = i / (COUNT - 1);
+      var r = 0.35 + h * 2.55;
+      var a = i * 2.399963 + h * 9.0;
+      pos[i * 3] = Math.cos(a) * r;
+      pos[i * 3 + 1] = h * 14;
+      pos[i * 3 + 2] = Math.sin(a) * r;
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    var mat = new THREE.PointsMaterial({
+      size: 1.05, map: glowTex, color: 0xd6f4ff, transparent: true, opacity: 0.95,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+      toneMapped: false
+    });
+    tornado.points = new THREE.Points(geo, mat);
+    tornado.points.frustumCulled = false;
+    tornado.baseMat = new THREE.MeshBasicMaterial({
+      color: 0x8fe6ff, transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+      side: THREE.DoubleSide
+    });
+    tornado.base = new THREE.Mesh(new THREE.RingGeometry(2.1, 3.2, 40), tornado.baseMat);
+    tornado.base.rotation.x = -Math.PI / 2;
+    tornado.base.position.y = 0.04;
+    var g = new THREE.Group();
+    g.add(tornado.points, tornado.base);
+    g.visible = false;
+    scene.add(g);
+    tornado.group = g;
+  })();
+
+  function startTornado() {
+    tornado.group.visible = true;
+    tornado.group.scale.setScalar(1);
+    tornado.group.position.set(LANE_X[(Math.random() * 3) | 0], 0, -62);
+    tornado.points.rotation.y = 0;
+    tornado.suckAcc = 0;
+    tornado.phase = Math.random() * 2;
+    showPopup('TORNADO <b>HOLD YOUR LINE</b>');
+    streamEvent('trackEvent', { kind: 'tornado' });
+  }
+
+  function suckNearTornado() {
+    var fx = tornado.group.position.x;
+    for (var i = 0; i < obstacles.length; i++) {
+      var o = obstacles[i];
+      if (!o.userData.active || o.userData.type !== 'cone') continue;
+      if (Math.abs(o.position.x - fx) < 2.2 && Math.abs(o.position.z) < 4) launchObstacle(o);
+    }
+    for (var c = 0; c < coins.length; c++) {
+      var coin = coins[c];
+      if (!coin.userData.active || coin.userData.sucked) continue;
+      if (Math.abs(coin.position.x - fx) < 2.2 && Math.abs(coin.position.z) < 4) coin.userData.sucked = true;
+    }
+  }
+
+  function updateTornado(dt) {
+    var t = trackEvent.t;
+    if (t <= trackEvent.dur) {
+      var phase = (t / 2.2 + tornado.phase) % 2;
+      var tri = phase < 1 ? phase : 2 - phase;
+      tornado.group.position.x = LANE_X[0] + (LANE_X[2] - LANE_X[0]) * tri;
+      // 漏斗持续 6s 从远处靠近，真正的危险窗口是 |z| < 3 时
+      tornado.group.position.z = -62 + 80 * (t / trackEvent.dur);
+      tornado.points.rotation.y += dt * 6;
+      tornado.base.rotation.z -= dt * 2;
+      if (state.mode === 'playing') {
+        if (Math.abs(state.carX - tornado.group.position.x) < 2.2 && Math.abs(tornado.group.position.z) < 3) {
+          triggerCrash({ position: { x: tornado.group.position.x, z: tornado.group.position.z } });
+        }
+        tornado.suckAcc += dt;
+        if (tornado.suckAcc >= 0.12) { tornado.suckAcc = 0; suckNearTornado(); }
+      }
+    } else {
+      var k = clamp((t - trackEvent.dur) / 0.45, 0, 1);
+      tornado.group.scale.setScalar(1 - k);
+      if (k >= 1) { tornado.group.visible = false; tornado.group.scale.setScalar(1); }
+    }
+  }
+
+  /* ---------- 路面塌陷 ---------- */
+  var collapse = { mesh: null, mat: null };
+  (function buildCollapse() {
+    var tex = canvasTexture(256, 256, function (g, w, h) {
+      g.clearRect(0, 0, w, h);
+      var grd = g.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, w / 2);
+      grd.addColorStop(0, 'rgba(2,4,8,.98)');
+      grd.addColorStop(.5, 'rgba(8,10,16,.95)');
+      grd.addColorStop(.8, 'rgba(40,10,14,.86)');
+      grd.addColorStop(.93, 'rgba(255,59,47,.55)');
+      grd.addColorStop(1, 'rgba(255,59,47,0)');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, w, h);
+      g.strokeStyle = 'rgba(87,230,255,.85)';
+      g.lineWidth = 6;
+      g.beginPath();
+      g.arc(w / 2, h / 2, w * 0.38, 0, TAU);
+      g.stroke();
+      g.strokeStyle = 'rgba(255,59,47,.7)';
+      g.lineWidth = 3;
+      g.beginPath();
+      g.arc(w / 2, h / 2, w * 0.46, 0, TAU);
+      g.stroke();
+    }, { srgb: true });
+    collapse.mat = new THREE.MeshBasicMaterial({
+      map: tex, transparent: true, opacity: 0.96, depthWrite: false, toneMapped: false
+    });
+    collapse.mesh = new THREE.Mesh(new THREE.PlaneGeometry(5.4, 7.2), collapse.mat);
+    collapse.mesh.rotation.x = -Math.PI / 2;
+    collapse.mesh.position.y = 0.03;
+    collapse.mesh.renderOrder = 1;
+    collapse.mesh.visible = false;
+    scene.add(collapse.mesh);
+  })();
+
+  function startCollapse() {
+    var lane = (Math.random() * 3) | 0;
+    // 不在玩家当前所在车道正下方撕开，给一次转向机会
+    if (Math.abs(LANE_X[lane] - state.carX) < 2.6) lane = (lane + 1 + ((Math.random() * 2) | 0)) % 3;
+    collapse.mesh.position.set(LANE_X[lane], 0.03, -1.2);
+    collapse.mesh.visible = true;
+    collapse.mat.opacity = 0.96;
+    showPopup('ROAD COLLAPSE <b>DODGE</b>');
+    streamEvent('trackEvent', { kind: 'collapse' });
+  }
+
+  function updateCollapse() {
+    if (trackEvent.t <= trackEvent.dur) {
+      if (state.mode === 'playing' && Math.abs(collapse.mesh.position.z) < 2.5 &&
+        Math.abs(state.carX - collapse.mesh.position.x) < 2.6) {
+        triggerCrash({ position: { x: collapse.mesh.position.x, z: collapse.mesh.position.z } });
+      }
+    } else {
+      var k = clamp((trackEvent.t - trackEvent.dur) / 0.4, 0, 1);
+      collapse.mat.opacity = 0.96 * (1 - k);
+      if (k >= 1) collapse.mesh.visible = false;
+    }
+  }
+
+  function startTrackEvent(kind) {
+    if (trackEvent.kind) return false;
+    if (kind !== 'ufo' && kind !== 'tornado' && kind !== 'collapse') return false;
+    trackEvent.kind = kind;
+    trackEvent.t = 0;
+    trackEvent.dur = kind === 'ufo' ? 2.5 : kind === 'tornado' ? 6 : 5;
+    trackEvent.nextAt = state.distance + rnd(2500, 3500);
+    if (kind === 'ufo') startUfo();
+    else if (kind === 'tornado') startTornado();
+    else startCollapse();
+    return true;
+  }
+
+  function endTrackEvent() {
+    trackEvent.kind = null;
+    trackEvent.t = 0;
+    ufo.group.visible = false;
+    tornado.group.visible = false;
+    tornado.group.scale.setScalar(1);
+    collapse.mesh.visible = false;
+    collapse.mat.opacity = 0.96;
+  }
+
+  function updateTrackEvents(dt) {
+    if (!trackEvent.kind) {
+      if (state.mode === 'playing' && state.distance >= trackEvent.nextAt) {
+        startTrackEvent(pick(['ufo', 'tornado', 'collapse']));
+      }
+      return;
+    }
+    trackEvent.t += dt;
+    if (trackEvent.kind === 'ufo') updateUfo();
+    else if (trackEvent.kind === 'tornado') updateTornado(dt);
+    else updateCollapse();
+    if (trackEvent.t > trackEvent.dur + 0.5) endTrackEvent();
+  }
+
+  function resetTrackEvents() {
+    if (trackEvent.kind) endTrackEvent();
+    trackEvent.nextAt = rnd(2500, 3500);
+  }
+
+  /* =========================================================
+     观众昵称铭牌：名字来自本地 /viewers，12% 障碍携带
+     —— 6 个 sprite 循环使用，纹理按名字缓存（最多 20）
+  ========================================================= */
+  var VIEWER_FALLBACK = [
+    'TESLA_FAN', 'NEON_RIDER', 'MOTORHEAD', 'PLASMA_KID', 'ROADSTER_99', 'CYBER_DRIFTER',
+    'VOLT_QUEEN', 'TURBO_JOE', 'MIDNIGHT_RUN', 'ION_BLAZE', 'GRID_HOUND', 'SKYLINE_SAM'
+  ];
+  var viewerNames = VIEWER_FALLBACK.slice();
+  var viewerFetchTried = false;
+
+  function cleanViewerName(name) {
+    if (typeof name !== 'string') return '';
+    return name.replace(/[<>&"'`]/g, '').trim().slice(0, 12).toUpperCase();
+  }
+
+  function loadViewerNames() {
+    if (viewerFetchTried) return;
+    viewerFetchTried = true;
+    try {
+      fetch('http://127.0.0.1:8790/viewers').then(function (r) {
+        return r.ok ? r.json() : null;
+      }).then(function (data) {
+        if (!data || !Array.isArray(data.names)) return;
+        var clean = [];
+        for (var i = 0; i < data.names.length && clean.length < 50; i++) {
+          var n = cleanViewerName(data.names[i]);
+          if (n) clean.push(n);
+        }
+        if (clean.length) viewerNames = clean;
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  loadViewerNames();
+
+  var PLATE_MAX = 6;
+  var PLATE_CACHE_MAX = 20;
+  var platePool = [];
+  var plateTexCache = {};
+  var plateCacheKeys = [];
+  (function buildPlatePool() {
+    for (var i = 0; i < PLATE_MAX; i++) {
+      var s = new THREE.Sprite(new THREE.SpriteMaterial({
+        color: 0xffffff, transparent: true, depthWrite: false, toneMapped: false
+      }));
+      s.visible = false;
+      s.scale.set(2.6, 0.65, 1);
+      s.userData.busy = false;
+      s.userData.name = null;
+      platePool.push(s);
+    }
+  })();
+
+  function makePlateMaterial(name) {
+    var entry = plateTexCache[name];
+    if (entry) return entry;
+    if (plateCacheKeys.length >= PLATE_CACHE_MAX) {
+      for (var i = 0; i < plateCacheKeys.length; i++) {
+        var key = plateCacheKeys[i];
+        var old = plateTexCache[key];
+        if (!old || old.use > 0) continue;
+        plateCacheKeys.splice(i, 1);
+        delete plateTexCache[key];
+        if (old.mat.map) old.mat.map = null;
+        old.mat.dispose();
+        old.tex.dispose();
+        break;
+      }
+    }
+    var tex = canvasTexture(256, 64, function (g, w, h) {
+      g.clearRect(0, 0, w, h);
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.lineJoin = 'round';
+      g.font = '700 34px Arial, sans-serif';
+      g.strokeStyle = '#57e6ff';
+      g.lineWidth = 7;
+      g.shadowColor = 'rgba(87,230,255,.95)';
+      g.shadowBlur = 14;
+      g.strokeText(name, w / 2, h / 2 + 1);
+      g.fillStyle = '#ffffff';
+      g.fillText(name, w / 2, h / 2 + 1);
+    }, { srgb: true });
+    var mat = new THREE.SpriteMaterial({
+      map: tex, transparent: true, depthWrite: false, depthTest: true, toneMapped: false
+    });
+    entry = { tex: tex, mat: mat, use: 0 };
+    plateTexCache[name] = entry;
+    plateCacheKeys.push(name);
+    return entry;
+  }
+
+  function attachViewerPlate(o) {
+    if (!viewerNames.length) return false;
+    var sprite = null;
+    for (var i = 0; i < platePool.length; i++) {
+      if (!platePool[i].userData.busy) { sprite = platePool[i]; break; }
+    }
+    if (!sprite) return false;
+    var name = pick(viewerNames);
+    var entry = makePlateMaterial(name);
+    entry.use++;
+    sprite.material = entry.mat;
+    sprite.userData.busy = true;
+    sprite.userData.name = name;
+    sprite.visible = true;
+    sprite.position.set(0, 2.2, 0);
+    o.add(sprite);
+    o.userData.plate = sprite;
+    o.userData.plateName = name;
+    return true;
+  }
+
+  function removeViewerPlate(o) {
+    var s = o.userData.plate;
+    if (!s) { o.userData.plateName = null; return; }
+    var name = s.userData.name;
+    if (name && plateTexCache[name]) plateTexCache[name].use = Math.max(0, plateTexCache[name].use - 1);
+    if (s.parent) s.parent.remove(s);
+    s.visible = false;
+    s.userData.busy = false;
+    s.userData.name = null;
+    o.userData.plate = null;
+    o.userData.plateName = null;
+  }
+
+  function resetViewerPlates() {
+    for (var i = 0; i < platePool.length; i++) {
+      var s = platePool[i];
+      if (s.parent) s.parent.remove(s);
+      s.visible = false;
+      s.userData.busy = false;
+      if (s.userData.name && plateTexCache[s.userData.name]) plateTexCache[s.userData.name].use = 0;
+      s.userData.name = null;
+    }
+    for (var j = 0; j < obstacles.length; j++) {
+      obstacles[j].userData.plate = null;
+      obstacles[j].userData.plateName = null;
+    }
   }
 
   /* =========================================================
@@ -2528,9 +2957,12 @@
       if (!pool[i].userData.active && !pool[i].userData.launch) { obj = pool[i]; break; }
     }
     if (!obj) return;
+    // 回收复用时先摘掉上一轮的观众铭牌
+    if (obj.userData.plate) removeViewerPlate(obj);
     obj.userData.active = true;
     obj.userData.near = false;
     obj.userData.killed = false;
+    obj.userData.drop = null;
     // 回收复用时清掉上一轮的 Boss / 警车标记与放大后的碰撞宽度
     obj.userData.boss = false;
     obj.userData.hp = 0;
@@ -2546,6 +2978,8 @@
     obj.userData.prevZ = z;
     // 抛飞回收的障碍被移出了 obstacles，重新上场时补回
     if (obstacles.indexOf(obj) < 0) obstacles.push(obj);
+    // 约 12% 障碍挂观众铭牌（同屏最多 6 个，超出直接放弃本次机会）
+    if (Math.random() < 0.12) attachViewerPlate(obj);
     return obj;
   }
 
@@ -2553,6 +2987,7 @@
      之后由 launched 逐帧播放，播完回收 */
   function launchObstacle(o) {
     if (o.userData.launch) return;
+    if (o.userData.plate) removeViewerPlate(o);
     o.userData.active = false;
     o.userData.near = true;  // 已撞飞，不再触发 near miss
     o.userData.launch = { t: 0, dir: (o.position.x >= state.carX ? 1 : -1) };
@@ -2616,7 +3051,9 @@
 
   function clearObstacles() {
     for (var i = 0; i < obstacles.length; i++) {
+      if (obstacles[i].userData.plate) removeViewerPlate(obstacles[i]);
       obstacles[i].userData.active = false;
+      obstacles[i].userData.drop = null;
       obstacles[i].visible = false;
     }
     for (var j = 0; j < launched.length; j++) {
@@ -2926,6 +3363,7 @@
     coin.userData.active = true;
     coin.userData.baseY = y;
     coin.userData.prevZ = z;
+    coin.userData.sucked = false;
     coin.position.set(LANE_X[lane], y, z);
     coin.rotation.set(0, rnd(0, TAU), 0);
     coin.scale.setScalar(1);
@@ -2985,6 +3423,17 @@
     for (var i = 0; i < coins.length; i++) {
       var coin = coins[i];
       if (!coin.userData.active) continue;
+      // 被龙卷风卷起：停住横向/纵向推进，只向上飘，飘出视野后回收
+      if (coin.userData.sucked) {
+        coin.position.y += dt * 9;
+        coin.rotation.y += dt * 9;
+        if (coin.position.y > 15) {
+          coin.userData.sucked = false;
+          coin.userData.active = false;
+          coin.visible = false;
+        }
+        continue;
+      }
       coin.userData.prevZ = coin.position.z;
       coin.position.z += state.speed * dt;
       coin.rotation.y += dt * 3.1;
@@ -4048,6 +4497,20 @@
       var o = obstacles[i];
       if (!o.userData.active) continue;
       var z0 = o.position.z;
+      // UFO 空投：下落期间冻结 z（避免还没落地就冲到玩家身后），落地后恢复车流推进
+      if (o.userData.drop) {
+        var dr = o.userData.drop;
+        dr.t += dt;
+        var dk = clamp(dr.t / dr.dur, 0, 1);
+        o.position.y = dr.y0 * (1 - dk) * (1 - dk);
+        if (dk >= 1) {
+          o.position.y = 0;
+          o.userData.drop = null;
+          dropLandFx(o);
+        }
+        o.userData.prevZ = z0;
+        continue;
+      }
       if (o.userData.chaser) {
         // 警车：从后方逐渐赶上，并左右摆动逼近
         o.position.z -= state.speed * dt * 0.12;
@@ -4123,24 +4586,36 @@
              sfxShield();
            } else if (o.userData.type === 'cone') {
              // 锥桶：任何速度都能撞飞，不掉速、不结束游戏
+             var coneName = o.userData.plateName;
              launchObstacle(o);
              state.score += 50;
              state.ramCount++;
              state.shake = Math.max(state.shake, .22);
              ramFx(o, false);
-             showPopup('RAM <b>+50</b>');
+             if (coneName) {
+               showPopup('RAM <b>' + coneName + '</b>');
+               streamEvent('viewerHit', { name: coneName });
+             } else {
+               showPopup('RAM <b>+50</b>');
+             }
              sfxRam();
              streamEvent('ram', { score: Math.floor(state.score), count: state.ramCount });
              broadcastEvent('ram');
            } else if ((heldInput.boost || state.nitroTimer > 0) && ramTypes[o.userData.type]) {
              // 冲撞：加速 / NITRO 中把车类障碍撞飞
+             var ramName = o.userData.plateName;
              launchObstacle(o);
              state.score += 250;
              state.ramCount++;
              state.shake = Math.max(state.shake, .5);
              state.speed *= 0.92;
              ramFx(o, true);
-             showPopup('RAM <b>+250</b>');
+             if (ramName) {
+               showPopup('RAM <b>' + ramName + '</b>');
+               streamEvent('viewerHit', { name: ramName });
+             } else {
+               showPopup('RAM <b>+250</b>');
+             }
              sfxRam();
              streamEvent('ram', { score: Math.floor(state.score), count: state.ramCount });
              broadcastEvent('ram');
@@ -4156,6 +4631,11 @@
       } else {
         o.userData.prevZ = z1;
       }
+    }
+    // 铭牌跟随障碍回收：障碍一旦失活/隐藏就归还 sprite 池
+    for (var pi = 0; pi < obstacles.length; pi++) {
+      var po = obstacles[pi];
+      if (po.userData.plate && (!po.userData.active || !po.visible)) removeViewerPlate(po);
     }
     // 把已经抛飞的障碍从 obstacles 中清除，避免数组泄漏
     if (launched.length) {
@@ -6042,6 +6522,7 @@
     updatePrecip(dt);
     updateRocket(dt);
     applyRocketSky();
+    updateTrackEvents(dt);
 
     if (state.mode === 'menu') {
       advanceWorld(dt, 26);
@@ -6147,7 +6628,8 @@
         broadcastMode: broadcastMode, replayActive: replay.active,
         weather: weather.current, rocketT: rocket.active ? +rocket.t.toFixed(2) : 0,
         skyroadActive: skyRoad.active, rocketActive: rocket.active,
-        ghost: ghost.active, bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2)
+        ghost: ghost.active, bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2),
+        eventKind: trackEvent.kind, viewers: viewerNames.length
       };
     },
     setWeather: function (id) {
@@ -6198,6 +6680,17 @@
     },
     spawnBoss: function () { return spawnBoss(); },
     startChase: function () { return startChase(); },
+    spawnEvent: function (kind) {
+      if (state.mode !== 'playing') return false;
+      return startTrackEvent(kind);
+    },
+    addViewer: function (name) {
+      var clean = cleanViewerName(name);
+      if (!clean) return false;
+      if (viewerNames.indexOf(clean) < 0) viewerNames.push(clean);
+      while (viewerNames.length > 50) viewerNames.shift();
+      return true;
+    },
     demoRam: function () {
       ramFx({ position: { x: state.carX, z: -3 } }, true);
       return true;

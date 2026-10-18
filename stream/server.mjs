@@ -39,6 +39,10 @@ const MIME = {
 const clients = new Set();
 /** 最近事件，旧的在前 */
 const recent = [];
+/** 最近 50 个不重复观众昵称（旧的在前） */
+const viewers = [];
+const VIEWER_LIMIT = 50;
+const VIEWER_NAME_MAX = 32;
 
 let heartbeat = null;
 
@@ -78,6 +82,57 @@ function handleEvents(req, res) {
   clients.add(res);
   req.on('close', () => clients.delete(res));
   res.on('close', () => clients.delete(res));
+}
+
+function handleViewer(req, res) {
+  const chunks = [];
+  let size = 0;
+  let aborted = false;
+
+  req.on('data', (chunk) => {
+    if (aborted) return;
+    size += chunk.length;
+    if (size > MAX_BODY) {
+      aborted = true;
+      sendJson(res, 413, { error: 'payload too large' });
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+
+  req.on('end', () => {
+    if (aborted) return;
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    } catch {
+      sendJson(res, 400, { error: 'invalid json' });
+      return;
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      sendJson(res, 400, { error: 'object expected' });
+      return;
+    }
+    let name = typeof payload.name === 'string' ? payload.name.trim() : '';
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' });
+      return;
+    }
+    name = name.slice(0, VIEWER_NAME_MAX);
+    const at = viewers.indexOf(name);
+    if (at >= 0) viewers.splice(at, 1);
+    viewers.push(name);
+    while (viewers.length > VIEWER_LIMIT) viewers.shift();
+    console.log(`[viewer] ${name}`);
+    cors(res);
+    res.writeHead(204);
+    res.end();
+  });
+
+  req.on('error', () => {
+    if (!res.headersSent) sendJson(res, 400, { error: 'bad request' });
+  });
 }
 
 function handleEvent(req, res) {
@@ -191,6 +246,8 @@ const server = http.createServer((req, res) => {
   }
   if (pathname === '/events' && req.method === 'GET') return handleEvents(req, res);
   if (pathname === '/event' && req.method === 'POST') return handleEvent(req, res);
+  if (pathname === '/viewer' && req.method === 'POST') return handleViewer(req, res);
+  if (pathname === '/viewers' && req.method === 'GET') return sendJson(res, 200, { names: viewers });
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, url);
   sendJson(res, 405, { error: 'method not allowed' });
 });

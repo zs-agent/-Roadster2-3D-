@@ -177,6 +177,14 @@
   #ramFlash.slam{animation:ramSlamOut .55s ease-out;}
   @keyframes ramFlashOut{0%{opacity:.9;}35%{opacity:.55;}100%{opacity:0;}}
   @keyframes ramSlamOut{0%{opacity:1;}40%{opacity:.7;}100%{opacity:0;}}
+  /* 火箭段专用蓝色暗角，和 #ramFlash / #flash 互不干扰 */
+  #rocketVignette{
+    position:absolute;inset:0;z-index:3;pointer-events:none;opacity:0;
+    transition:opacity 1.1s ease;
+    background:radial-gradient(circle at 50% 58%, transparent 40%, rgba(48,138,255,.16) 76%, rgba(110,200,255,.46) 100%);
+    mix-blend-mode:screen;
+  }
+  #rocketVignette.on{opacity:1;}
 
   /* ---------- overlays ---------- */
   .overlay{
@@ -459,6 +467,7 @@
      <div id="subtitle"></div>
      <div id="flash"></div>
 <div id="ramFlash"></div>
+<div id="rocketVignette"></div>
      <div id="replayBox">
        <span class="replay-tag">REPLAY</span>
        <video id="replayVideo" muted playsinline></video>
@@ -723,7 +732,8 @@
   sky.renderOrder = -20;
   scene.add(sky);
 
-  // stars
+  // stars（提到外层作用域，天气系统要改 opacity）
+  var stars = null;
   (function () {
     var count = 850;
     var pos = new Float32Array(count * 3);
@@ -742,7 +752,7 @@
       color: 0xbdd6ee, size: 1.35, sizeAttenuation: false,
       transparent: true, opacity: 0.3, depthWrite: false, fog: false
     });
-    var stars = new THREE.Points(geo, mat);
+    stars = new THREE.Points(geo, mat);
     scene.add(stars);
   })();
 
@@ -1357,7 +1367,8 @@
     new THREE.SpriteMaterial({ map: glowTex, color: 0xff4c94, transparent: true, opacity: .17, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
   ];
   var skyRings = [];
-  for (var ri = 0; ri < 5; ri++) {
+  var SKY_RING_COUNT = 8;
+  for (var ri = 0; ri < SKY_RING_COUNT; ri++) {
     var ring = new THREE.Group();
     var torus = new THREE.Mesh(ringGeo, ringMats[ri % 2]);
     ring.add(torus);
@@ -1368,8 +1379,325 @@
     ring.userData.prevZ = ring.position.z;
     ring.userData.phase = rnd(0, TAU);
     ring.userData.bonusReady = true;
+    ring.userData.chain = null;
     scene.add(ring);
     skyRings.push(ring);
+  }
+
+  /* =========================================================
+     天气 / 昼夜循环
+     —— 每 1500m 换一次，固定顺序，3 秒插值过渡
+  ========================================================= */
+  var WEATHERS = {
+    dawn: {
+      name: '黎明',
+      cTop: 0x16284a, cMid: 0x62466f, cHor: 0xff9b62,
+      fogColor: 0x5a3d4c, fogNear: 130, fogFar: 1050,
+      hemiSky: 0x95b4df, hemiGround: 0x4a302d, hemiInt: 1.02,
+      dirColor: 0xffd4a6, dirInt: 1.48,
+      exposure: 1.18, stars: 0.30, moon: 0.22, sun: 0.68, glow: 1.00
+    },
+    day: {
+      name: '白昼',
+      cTop: 0x1b6fc4, cMid: 0x63b2ec, cHor: 0xd6efff,
+      fogColor: 0xb9d4e6, fogNear: 260, fogFar: 1700,
+      hemiSky: 0xd2e8ff, hemiGround: 0x5b6670, hemiInt: 1.55,
+      dirColor: 0xfff4e2, dirInt: 2.05,
+      exposure: 1.32, stars: 0.00, moon: 0.00, sun: 0.86, glow: 0.34
+    },
+    dusk: {
+      name: '黄昏',
+      cTop: 0x1d1636, cMid: 0x8a3c62, cHor: 0xff7a3c,
+      fogColor: 0x62303f, fogNear: 110, fogFar: 900,
+      hemiSky: 0x8d6bb5, hemiGround: 0x3a2320, hemiInt: 0.92,
+      dirColor: 0xffa96b, dirInt: 1.30,
+      exposure: 1.12, stars: 0.22, moon: 0.10, sun: 1.00, glow: 1.25
+    },
+    neonRain: {
+      name: '霓虹夜雨',
+      cTop: 0x04090f, cMid: 0x08222b, cHor: 0x0d4a5c,
+      fogColor: 0x07222c, fogNear: 45, fogFar: 420,
+      hemiSky: 0x2f6f8c, hemiGround: 0x0a1a20, hemiInt: 0.52,
+      dirColor: 0x67c8ff, dirInt: 0.58,
+      exposure: 1.00, stars: 0.06, moon: 0.34, sun: 0.00, glow: 0.50
+    },
+    sandstorm: {
+      name: '沙暴',
+      cTop: 0x6b4a22, cMid: 0xb8834a, cHor: 0xd8a869,
+      fogColor: 0xa9793f, fogNear: 15, fogFar: 220,
+      hemiSky: 0xd8b880, hemiGround: 0x6b4a22, hemiInt: 0.88,
+      dirColor: 0xffd28a, dirInt: 0.92,
+      exposure: 1.05, stars: 0.00, moon: 0.00, sun: 0.15, glow: 0.45
+    }
+  };
+  var WEATHER_ORDER = ['dawn', 'day', 'dusk', 'neonRain', 'sandstorm'];
+  var WEATHER_SPAN = 1500;
+  var WEATHER_LERP = 3;
+
+  function weatherSnapshot(id) {
+    var d = WEATHERS[id] || WEATHERS.dawn;
+    return {
+      cTop: new THREE.Color(d.cTop),
+      cMid: new THREE.Color(d.cMid),
+      cHor: new THREE.Color(d.cHor),
+      fogColor: new THREE.Color(d.fogColor),
+      fogNear: d.fogNear, fogFar: d.fogFar,
+      hemiSky: new THREE.Color(d.hemiSky),
+      hemiGround: new THREE.Color(d.hemiGround),
+      hemiInt: d.hemiInt,
+      dirColor: new THREE.Color(d.dirColor),
+      dirInt: d.dirInt,
+      exposure: d.exposure,
+      stars: d.stars, moon: d.moon, sun: d.sun, glow: d.glow
+    };
+  }
+
+  // a → b 插值并写回真实对象（不改 a / b）
+  function applyWeatherBlend(a, b, t) {
+    skyMat.uniforms.cTop.value.lerpColors(a.cTop, b.cTop, t);
+    skyMat.uniforms.cMid.value.lerpColors(a.cMid, b.cMid, t);
+    skyMat.uniforms.cHor.value.lerpColors(a.cHor, b.cHor, t);
+    scene.fog.color.lerpColors(a.fogColor, b.fogColor, t);
+    scene.fog.near = a.fogNear + (b.fogNear - a.fogNear) * t;
+    scene.fog.far = a.fogFar + (b.fogFar - a.fogFar) * t;
+    hemi.color.lerpColors(a.hemiSky, b.hemiSky, t);
+    hemi.groundColor.lerpColors(a.hemiGround, b.hemiGround, t);
+    hemi.intensity = a.hemiInt + (b.hemiInt - a.hemiInt) * t;
+    dirLight.color.lerpColors(a.dirColor, b.dirColor, t);
+    dirLight.intensity = a.dirInt + (b.dirInt - a.dirInt) * t;
+    renderer.toneMappingExposure = a.exposure + (b.exposure - a.exposure) * t;
+    stars.material.opacity = a.stars + (b.stars - a.stars) * t;
+    var moonO = a.moon + (b.moon - a.moon) * t;
+    moon.material.opacity = moonO;
+    moonCore.material.opacity = moonO * 1.82;
+    var sunO = a.sun + (b.sun - a.sun) * t;
+    sunsetSun.material.opacity = sunO * 0.68;
+    sunsetSunCore.material.opacity = sunO * 0.95;
+    var glowO = a.glow + (b.glow - a.glow) * t;
+    horizonGlow.material.opacity = 0.52 * glowO;
+    horizonGlow2.material.opacity = 0.27 * glowO;
+    horizonGlow3.material.opacity = 0.22 * glowO;
+  }
+
+  var weather = {
+    current: 'dawn',
+    index: 0,
+    nextAt: WEATHER_SPAN,
+    from: weatherSnapshot('dawn'),
+    to: weatherSnapshot('dawn'),
+    blend: 1
+  };
+
+  var rocketVignetteEl = document.getElementById('rocketVignette');
+
+  function setWeather(id, instant, announce) {
+    if (!WEATHERS[id]) return false;
+    weather.from = weatherSnapshot(weather.current);
+    weather.to = weatherSnapshot(id);
+    weather.current = id;
+    weather.blend = instant ? 1 : 0;
+    applyWeatherBlend(weather.from, weather.to, weather.blend);
+    setPrecipMode(id === 'neonRain' ? 'rain' : (id === 'sandstorm' ? 'sand' : 'off'));
+    if (announce !== false) {
+      showPopup('WEATHER <b>' + WEATHERS[id].name + '</b>');
+      streamEvent('weather', { name: id });
+    }
+    return true;
+  }
+
+  function updateWeather(dt) {
+    if (weather.blend < 1) {
+      weather.blend = Math.min(1, weather.blend + dt / WEATHER_LERP);
+    }
+    applyWeatherBlend(weather.from, weather.to, weather.blend);
+    if (state.mode === 'playing' && state.distance >= weather.nextAt) {
+      weather.nextAt = state.distance + WEATHER_SPAN;
+      weather.index = (weather.index + 1) % WEATHER_ORDER.length;
+      setWeather(WEATHER_ORDER[weather.index], false, true);
+    }
+  }
+
+  /* =========================================================
+     降水粒子池（雨 / 沙尘共用，420 点，循环复用）
+  ========================================================= */
+  var PRECIP_COUNT = 420;
+  var rainTex = canvasTexture(16, 128, function (g, w, h) {
+    g.clearRect(0, 0, w, h);
+    var grd = g.createLinearGradient(0, 0, 0, h);
+    grd.addColorStop(0, 'rgba(255,255,255,0)');
+    grd.addColorStop(0.30, 'rgba(255,255,255,.55)');
+    grd.addColorStop(0.78, 'rgba(255,255,255,1)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(w * 0.5 - 1, 0, 2, h);
+  });
+
+  var precipPos = new Float32Array(PRECIP_COUNT * 3);
+  var precipVel = new Float32Array(PRECIP_COUNT);
+  var precipDrift = new Float32Array(PRECIP_COUNT);
+  var precipGeo = new THREE.BufferGeometry();
+  precipGeo.setAttribute('position', new THREE.BufferAttribute(precipPos, 3));
+
+  var precipMatRain = new THREE.PointsMaterial({
+    map: rainTex, color: 0xd6f0ff, size: 0.62, sizeAttenuation: true,
+    transparent: true, opacity: 0.55, depthWrite: false,
+    blending: THREE.AdditiveBlending, fog: false, toneMapped: false
+  });
+  var precipMatSand = new THREE.PointsMaterial({
+    map: glowTex, color: 0xd9b271, size: 0.32, sizeAttenuation: true,
+    transparent: true, opacity: 0.5, depthWrite: false,
+    fog: false, toneMapped: false
+  });
+
+  var precip = new THREE.Points(precipGeo, precipMatRain);
+  precip.frustumCulled = false;
+  precip.visible = false;
+  scene.add(precip);
+  var precipMode = 'off';
+
+  function resetPrecipParticle(i, initial) {
+    var p = i * 3;
+    precipPos[p] = rnd(-34, 34);
+    precipPos[p + 1] = initial ? rnd(0, 34) : rnd(20, 36);
+    precipPos[p + 2] = rnd(-80, 24);
+    precipVel[i] = rnd(0.78, 1.28);
+    precipDrift[i] = rnd(-1, 1);
+  }
+
+  function setPrecipMode(mode) {
+    if (mode === precipMode) return;
+    precipMode = mode;
+    if (mode === 'off') {
+      precip.visible = false;
+      return;
+    }
+    precip.material = mode === 'rain' ? precipMatRain : precipMatSand;
+    for (var i = 0; i < PRECIP_COUNT; i++) resetPrecipParticle(i, true);
+    precipGeo.attributes.position.needsUpdate = true;
+    precip.visible = true;
+  }
+
+  function updatePrecip(dt) {
+    if (precipMode === 'off') return;
+    var rain = precipMode === 'rain';
+    var fallBase = rain ? 48 : 8;
+    var driftBase = rain ? 3.2 : 26;
+    var push = state.speed * dt * (rain ? 1 : 1.25);
+    precip.position.x = damp(precip.position.x, state.carX, 3, dt);
+    for (var i = 0; i < PRECIP_COUNT; i++) {
+      var p = i * 3;
+      precipPos[p + 1] -= fallBase * precipVel[i] * dt;
+      precipPos[p] += precipDrift[i] * driftBase * dt;
+      precipPos[p + 2] += push;
+      if (precipPos[p + 1] < -1.5 || precipPos[p + 2] > 30) resetPrecipParticle(i, false);
+    }
+    precipGeo.attributes.position.needsUpdate = true;
+  }
+
+  /* =========================================================
+     天路（光环链）：每 1400m 一次，8 个环排成一条链
+  ========================================================= */
+  var SKY_ROAD_LANES = [0, 1, 2, 1, 0, 1, 2, 1];
+  var SKY_ROAD_SPAN = 1400;
+  var skyRoad = { active: false, seq: 0, nextAt: SKY_ROAD_SPAN };
+
+  function spawnSkyRoad() {
+    skyRoad.active = true;
+    skyRoad.seq++;
+    for (var i = 0; i < skyRings.length; i++) {
+      var ring = skyRings[i];
+      ring.position.set(
+        LANE_X[SKY_ROAD_LANES[i % SKY_ROAD_LANES.length]],
+        6 + (i / Math.max(1, skyRings.length - 1)) * 10,
+        -260 + i * 34
+      );
+      ring.userData.prevZ = ring.position.z;
+      ring.userData.bonusReady = true;
+      // 几何按 i 递增（z 从 -260 到 -22、高度 6→16），index 按“穿环顺序”编号：
+      // z=-22 的环最先被穿过 = index 0，z=-260 的环最后被穿过 = index total-1
+      ring.userData.chain = { id: skyRoad.seq, index: skyRings.length - 1 - i, total: skyRings.length };
+    }
+    return true;
+  }
+
+  function updateSkyRoad() {
+    if (skyRoad.active) return;
+    if (state.mode !== 'playing') return;
+    if (state.distance < skyRoad.nextAt) return;
+    skyRoad.nextAt = state.distance + SKY_ROAD_SPAN;
+    spawnSkyRoad();
+  }
+
+  /* =========================================================
+     火箭段：每 5000m 一次大事件，18 秒 + 2 秒回落
+  ========================================================= */
+  var rocket = { active: false, t: 0, blend: 0, nextAt: 5000, hold: 18, fadeIn: 1.2, fadeOut: 2 };
+  var ROCKET_SPAN = 5000;
+  var rocketTop = new THREE.Color(0x01030c);
+  var rocketMid = new THREE.Color(0x030a1e);
+  var rocketHor = new THREE.Color(0x0a1430);
+  var rocketFog = new THREE.Color(0x050a18);
+
+  function startRocket() {
+    if (rocket.active) return false;
+    rocket.active = true;
+    rocket.t = 0;
+    rocket.blend = 0;
+    showPopup('ESCAPE VELOCITY <b>冲出大气</b>');
+    streamEvent('rocket', { distance: Math.floor(state.distance) });
+    if (rocketVignetteEl) rocketVignetteEl.classList.add('on');
+    return true;
+  }
+
+  function updateRocket(dt) {
+    if (!rocket.active && state.mode === 'playing' && state.distance >= rocket.nextAt) {
+      rocket.nextAt = state.distance + ROCKET_SPAN;
+      startRocket();
+    }
+    if (!rocket.active) return;
+    rocket.t += dt;
+    if (rocket.t < rocket.fadeIn) {
+      rocket.blend = Math.min(1, rocket.t / rocket.fadeIn);
+    } else if (rocket.t < rocket.hold) {
+      rocket.blend = 1;
+    } else {
+      rocket.blend = Math.max(0, 1 - (rocket.t - rocket.hold) / rocket.fadeOut);
+    }
+    if (rocket.t > rocket.hold && rocket.blend <= 0) {
+      rocket.active = false;
+      rocket.t = 0;
+      rocket.blend = 0;
+      if (rocketVignetteEl) rocketVignetteEl.classList.remove('on');
+      streamEvent('rocketEnd', { distance: Math.floor(state.distance), score: Math.floor(state.score) });
+    }
+  }
+
+  // 在天气插值之后覆盖天空（不改天气状态，所以结束后自动复原）
+  function applyRocketSky() {
+    var b = rocket.blend;
+    if (b <= 0.001) return;
+    skyMat.uniforms.cTop.value.lerp(rocketTop, b);
+    skyMat.uniforms.cMid.value.lerp(rocketMid, b);
+    skyMat.uniforms.cHor.value.lerp(rocketHor, b);
+    scene.fog.color.lerp(rocketFog, b);
+    scene.fog.near = scene.fog.near + (300 - scene.fog.near) * b;
+    scene.fog.far = scene.fog.far + (3000 - scene.fog.far) * b;
+    stars.material.opacity = stars.material.opacity + (1 - stars.material.opacity) * b;
+    renderer.toneMappingExposure = renderer.toneMappingExposure + (1.06 - renderer.toneMappingExposure) * b;
+  }
+
+  function resetContentCycle() {
+    setWeather('dawn', true, false);
+    weather.index = 0;
+    weather.nextAt = WEATHER_SPAN;
+    skyRoad.active = false;
+    skyRoad.nextAt = SKY_ROAD_SPAN;
+    for (var i = 0; i < skyRings.length; i++) skyRings[i].userData.chain = null;
+    rocket.active = false;
+    rocket.t = 0;
+    rocket.blend = 0;
+    rocket.nextAt = ROCKET_SPAN;
+    if (rocketVignetteEl) rocketVignetteEl.classList.remove('on');
   }
 
   /* =========================================================
@@ -3618,6 +3946,10 @@
       var pulse = 1 + Math.sin(state.t * 2.2 + ring.userData.phase) * 0.035;
       ring.scale.setScalar(pulse);
       if (ring.position.z > 60) {
+        if (ring.userData.chain) {
+          if (ring.userData.chain.index === ring.userData.chain.total - 1) skyRoad.active = false;
+          ring.userData.chain = null;
+        }
         ring.position.z -= 470;
         ring.position.x = LANE_X[(Math.random() * 3) | 0];
         ring.position.y = rnd(6, 15);
@@ -3631,6 +3963,7 @@
      Spawning / obstacles / collision
   ========================================================= */
   function spawnWave() {
+    if (rocket.active) return; // 火箭段不生成障碍
     if (autoPilot && Math.random() < .25) return;
     var count = 1;
     if (Math.random() < Math.min(0.80, 0.52 + state.elapsed * 0.004)) count = 2;
@@ -3789,9 +4122,22 @@
           state.score += 250;
           state.air = Math.min(AIR_MAX, state.air + 20);
            state.shake = Math.max(state.shake, .25);
-                      showPopup('SKY GATE <b>+250</b>');
            commentary('gate');
            sfxGate();
+           var chain = ring.userData.chain;
+           if (chain) {
+             streamEvent('skygate', { index: chain.index });
+             if (chain.index === chain.total - 1) {
+               state.score += 1000;
+               showPopup('SKY ROAD <b>COMPLETE +1000</b>');
+               streamEvent('skyroad', { bonus: 1000 });
+               skyRoad.active = false;
+             } else {
+               showPopup('SKY ROAD <b>' + (chain.index + 1) + '/' + chain.total + '</b>');
+             }
+           } else {
+             showPopup('SKY GATE <b>+250</b>');
+           }
         }
       }
     }
@@ -3888,6 +4234,7 @@
     state.elapsed = 0;
     state.distance = 0;
     state.score = 0;
+    resetContentCycle();
     state.speed = 26;
     state.prevSpeed = 26;
     state.targetSpeed = 62;
@@ -4740,6 +5087,25 @@
       state.air = Math.max(20, state.air - flight.boostAirDrain * dt);
     }
 
+    // 火箭段：反重力抬升，仍然可以变道 / 加速，但不能再起跳/俯冲
+    if (rocket.blend > 0.02) {
+      state.thrusting = true;
+      state.grounded = false;
+      state.air = AIR_MAX;
+      state.airTime = 0;
+      state.maxAlt = Math.max(state.maxAlt, state.carY);
+      var liftTarget = 14 * rocket.blend;
+      state.vy -= flight.gravity * (1 - 0.65 * rocket.blend) * dt;
+      state.vy += ((liftTarget - state.carY) * 12 + 16 * rocket.blend) * dt;
+      state.vy = clamp(state.vy, -16, 10);
+      state.carY = clamp(state.carY + state.vy * dt, 0, flight.maxHeight);
+      if (state.carY <= 0) {
+        state.carY = 0;
+        if (state.vy < 0) state.vy = 0;
+      }
+      return;
+    }
+
     if (state.grounded) {
       state.carY = 0;
       state.vy = 0;
@@ -5242,6 +5608,12 @@
     state.t += dt;
     state.hudAcc += dt;
 
+    // 内容层（天气 / 天路 / 火箭）：让 updateFlight 先用上火箭 blend
+    updateWeather(dt);
+    updatePrecip(dt);
+    updateRocket(dt);
+    applyRocketSky();
+
     if (state.mode === 'menu') {
       advanceWorld(dt, 26);
       updateCar(dt);
@@ -5269,6 +5641,7 @@
 
                    advanceWorld(dt, state.speed);
        updateSkyGates();
+       updateSkyRoad();
        updateObstacles(dt, true);
        updateDemo(dt);
        updateFlight(dt);
@@ -5341,8 +5714,23 @@
         carY: state.carY, grounded: state.grounded,
         ramCount: state.ramCount || 0, slamCount: state.slamCount || 0,
         shot: director.shot, slow: director.slowT > 0,
-        broadcastMode: broadcastMode, replayActive: replay.active
+        broadcastMode: broadcastMode, replayActive: replay.active,
+        weather: weather.current, rocketT: rocket.active ? +rocket.t.toFixed(2) : 0,
+        skyroadActive: skyRoad.active, rocketActive: rocket.active
       };
+    },
+    setWeather: function (id) {
+      if (typeof id !== 'string' || !WEATHERS[id]) return false;
+      if (weather.current !== id) setWeather(id, true, true);
+      return true;
+    },
+    spawnSkyRoad: function () {
+      if (state.mode !== 'playing') return false;
+      return spawnSkyRoad();
+    },
+    startRocket: function () {
+      if (state.mode !== 'playing') return false;
+      return startRocket();
     },
     setShot: function (name) {
       if (typeof name !== 'string' || !SHOTS[name]) return false;

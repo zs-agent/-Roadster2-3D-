@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Neon Run — Live Overlay</title>
+<style>
+  :root {
+    --neon: #38f6f6;
+    --neon-dim: rgba(56, 246, 246, 0.42);
+    --panel: rgba(2, 10, 14, 0.56);
+    --text: #e8feff;
+    --mute: #7fa9b3;
+    --warn: #ffb347;
+    --hot: #ff4d6d;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    width: 1920px;
+    height: 1080px;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+  }
+  body {
+    font-family: "SF Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: 0.04em;
+    pointer-events: none;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--neon-dim);
+    border-radius: 10px;
+    box-shadow: 0 0 18px rgba(56, 246, 246, 0.16), inset 0 0 22px rgba(56, 246, 246, 0.06);
+    backdrop-filter: blur(2px);
+  }
+
+  /* -------- 右上：数据 -------- */
+  .stats {
+    position: absolute;
+    top: 48px;
+    right: 56px;
+    padding: 20px 26px 18px;
+    width: 336px;
+  }
+  .stat { display: flex; align-items: baseline; justify-content: space-between; padding: 6px 0; }
+  .stat + .stat { border-top: 1px solid rgba(56, 246, 246, 0.12); }
+  .stat .k {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--mute);
+    letter-spacing: 0.18em;
+  }
+  .stat .v {
+    font-size: 34px;
+    font-weight: 700;
+    color: var(--neon);
+    text-shadow: 0 0 12px rgba(56, 246, 246, 0.55);
+    font-variant-numeric: tabular-nums;
+    transition: color 0.18s ease;
+  }
+  .stat.flash .v { color: #ffffff; }
+
+  /* -------- 左上：LIVE -------- */
+  .live {
+    position: absolute;
+    top: 48px;
+    left: 56px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px 12px 16px;
+  }
+  .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--hot);
+    box-shadow: 0 0 12px rgba(255, 77, 109, 0.9);
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+  .dot.blink { animation: blink 0.35s ease-out 1; }
+  .dot.off { background: #4a5a60; box-shadow: none; }
+  @keyframes blink {
+    0% { transform: scale(1); background: #ffffff; box-shadow: 0 0 26px #ffffff; }
+    100% { transform: scale(1); background: var(--hot); }
+  }
+  .live .txt {
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: 0.3em;
+    color: var(--neon);
+    text-shadow: 0 0 10px rgba(56, 246, 246, 0.5);
+  }
+  .live .sub {
+    font-size: 12px;
+    color: var(--mute);
+    letter-spacing: 0.16em;
+    margin-left: 4px;
+  }
+
+  /* -------- 底部：事件条 -------- */
+  .feed {
+    position: absolute;
+    left: 56px;
+    bottom: 56px;
+    width: 760px;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 8px;
+    min-height: 8px;
+  }
+  .item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 18px;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--neon-dim);
+    border-left: 3px solid var(--neon);
+    border-radius: 6px;
+    animation: slideIn 0.24s ease-out both;
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  }
+  .item.out { opacity: 0; transform: translateX(-16px); }
+  .item .tag { color: var(--neon); letter-spacing: 0.12em; }
+  .item .delta { color: #ffffff; font-variant-numeric: tabular-nums; }
+  .item .note { color: var(--mute); font-size: 15px; font-weight: 500; letter-spacing: 0.08em; }
+  .item.hot { border-left-color: var(--warn); }
+  .item.hot .tag { color: var(--warn); }
+  .item.bad { border-left-color: var(--hot); }
+  .item.bad .tag { color: var(--hot); }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-24px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  /* -------- 中央：HIGHLIGHT -------- */
+  .highlight {
+    position: absolute;
+    left: 50%;
+    top: 44%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    opacity: 0;
+  }
+  .highlight.on { animation: pop 0.8s ease-out forwards; }
+  .highlight .big {
+    font-size: 96px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: #ffffff;
+    text-shadow: 0 0 26px var(--neon), 0 0 64px rgba(56, 246, 246, 0.7);
+  }
+  .highlight .small {
+    margin-top: 6px;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.4em;
+    color: var(--neon);
+    text-shadow: 0 0 14px rgba(56, 246, 246, 0.8);
+  }
+  @keyframes pop {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.82); }
+    18% { opacity: 1; transform: translate(-50%, -50%) scale(1.04); }
+    70% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -50%) scale(1.02); }
+  }
+</style>
+</head>
+<body>
+  <div class="live panel">
+    <span id="dot" class="dot off"></span>
+    <span class="txt">LIVE</span>
+    <span id="link" class="sub">CONNECTING</span>
+  </div>
+
+  <div class="stats panel">
+    <div class="stat" id="rowDistance"><span class="k">DISTANCE</span><span class="v" id="distance">0</span></div>
+    <div class="stat" id="rowScore"><span class="k">SCORE</span><span class="v" id="score">0</span></div>
+    <div class="stat" id="rowCoins"><span class="k">COINS</span><span class="v" id="coins">0</span></div>
+    <div class="stat" id="rowSpeed"><span class="k">SPEED</span><span class="v" id="speed">0</span></div>
+  </div>
+
+  <div id="feed" class="feed"></div>
+
+  <div id="highlight" class="highlight">
+    <div class="big" id="hlBig">IMPACT</div>
+    <div class="small" id="hlSmall">HIGHLIGHT</div>
+  </div>
+
+<script>
+  (function () {
+    'use strict';
+
+    var ES_URL = 'http://127.0.0.1:8790/events';
+    var FEED_MAX = 6;
+    var FEED_TTL = 8000;
+
+    var el = {
+      dot: document.getElementById('dot'),
+      link: document.getElementById('link'),
+      distance: document.getElementById('distance'),
+      score: document.getElementById('score'),
+      coins: document.getElementById('coins'),
+      speed: document.getElementById('speed'),
+      feed: document.getElementById('feed'),
+      hl: document.getElementById('highlight'),
+      hlBig: document.getElementById('hlBig'),
+      hlSmall: document.getElementById('hlSmall'),
+      rowScore: document.getElementById('rowScore'),
+      rowCoins: document.getElementById('rowCoins'),
+      rowSpeed: document.getElementById('rowSpeed')
+    };
+
+    var fmt = function (n) {
+      var v = Number(n);
+      if (!isFinite(v)) return '0';
+      return Math.round(v).toLocaleString('en-US');
+    };
+
+    var last = { score: null, distance: null, coins: null, speed: null };
+    var connected = false;
+    var hlTimer = 0;
+    var blinkTimer = 0;
+
+    function setVal(node, key, value) {
+      var v = Number(value);
+      if (!isFinite(v)) return;
+      if (last[key] === v) return;
+      last[key] = v;
+      node.textContent = fmt(v);
+    }
+
+    function pulse(el2, cls, ms) {
+      if (!el2) return;
+      el2.classList.remove(cls);
+      void el2.offsetWidth;
+      el2.classList.add(cls);
+      clearTimeout(el2.__pulseTimer);
+      el2.__pulseTimer = setTimeout(function () { el2.classList.remove(cls); }, ms);
+    }
+
+    function setConnected(on) {
+      if (connected === on) return;
+      connected = on;
+      el.dot.classList.toggle('off', !on);
+      el.link.textContent = on ? 'STREAM' : 'OFFLINE';
+    }
+
+    function blink() {
+      if (!connected) return;
+      clearTimeout(blinkTimer);
+      el.dot.classList.remove('blink');
+      void el.dot.offsetWidth;
+      el.dot.classList.add('blink');
+      blinkTimer = setTimeout(function () { el.dot.classList.remove('blink'); }, 380);
+    }
+
+    var LABELS = {
+      ram: { tag: 'RAM', note: '撞击', cls: 'hot' },
+      slam: { tag: 'SLAM', note: '落地重压', cls: 'hot' },
+      near: { tag: 'NEAR MISS', note: '擦身而过', cls: '' },
+      pickup: { tag: 'PICKUP', note: '拾取', cls: '' },
+      crash: { tag: 'CRASH', note: '撞毁', cls: 'bad' },
+      over: { tag: 'RUN OVER', note: '结算', cls: 'bad' },
+      start: { tag: 'START', note: '开跑', cls: '' },
+      milestone: { tag: 'MILESTONE', note: '里程碑', cls: '' }
+    };
+    var FALLBACK_DELTA = { ram: 250, slam: 450, near: 60, pickup: 25 };
+
+    function pushFeed(item, delta, evt) {
+      var row = document.createElement('div');
+      row.className = 'item ' + (item.cls || '');
+      var tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = item.tag;
+      row.appendChild(tag);
+      if (delta > 0) {
+        var d = document.createElement('span');
+        d.className = 'delta';
+        d.textContent = '+' + fmt(delta);
+        row.appendChild(d);
+      }
+      var note = document.createElement('span');
+      note.className = 'note';
+      note.textContent = item.note + (evt.count > 1 ? ' x' + evt.count : '');
+      row.appendChild(note);
+      el.feed.appendChild(row);
+
+      while (el.feed.children.length > FEED_MAX) el.feed.removeChild(el.feed.firstChild);
+
+      setTimeout(function () {
+        row.classList.add('out');
+        setTimeout(function () { if (row.parentNode) row.parentNode.removeChild(row); }, 650);
+      }, FEED_TTL);
+    }
+
+    function highlight(main, sub) {
+      el.hlBig.textContent = main;
+      el.hlSmall.textContent = sub;
+      el.hl.classList.remove('on');
+      void el.hl.offsetWidth;
+      el.hl.classList.add('on');
+      clearTimeout(hlTimer);
+      hlTimer = setTimeout(function () { el.hl.classList.remove('on'); }, 900);
+    }
+
+    function deltaFor(type, evt) {
+      var score = Number(evt.score);
+      if (isFinite(score)) {
+        var d = last.score === null ? 0 : score - last.score;
+        if (d > 0 && d < 100000) return d;
+        if (last.score === null) return FALLBACK_DELTA[type] || 0;
+        return 0;
+      }
+      return FALLBACK_DELTA[type] || 0;
+    }
+
+    function handle(evt) {
+      if (!evt || typeof evt !== 'object') return;
+      var type = typeof evt.type === 'string' ? evt.type : '';
+      blink();
+
+      var delta = (type === 'ram' || type === 'slam' || type === 'near' || type === 'pickup')
+        ? deltaFor(type, evt) : 0;
+
+      if (type === 'milestone') {
+        setVal(el.distance, 'distance', evt.distance);
+        setVal(el.score, 'score', evt.score);
+      } else if (type === 'ram' || type === 'slam' || type === 'near' || type === 'over') {
+        setVal(el.score, 'score', evt.score);
+      }
+      if (evt.coins !== undefined) setVal(el.coins, 'coins', evt.coins);
+      if (evt.speed !== undefined) setVal(el.speed, 'speed', evt.speed);
+      if (type === 'start') {
+        last.score = null;
+        el.feed.textContent = '';
+        setVal(el.score, 'score', 0);
+      }
+
+      var item = LABELS[type];
+      if (item) pushFeed(item, type === 'over' ? 0 : delta, evt);
+
+      if (type === 'ram') {
+        highlight('IMPACT', 'RAM CLEAR');
+        pulse(el.rowScore, 'flash', 220);
+      } else if (type === 'slam') {
+        highlight('SLAM', 'GROUND POUND');
+        pulse(el.rowScore, 'flash', 220);
+      } else if (type === 'crash') {
+        highlight('CRASH', 'RUN ENDED');
+      } else if (type === 'over') {
+        highlight('FINISH', 'SCORE ' + fmt(evt.score));
+      }
+    }
+
+    function connect() {
+      var es;
+      try {
+        es = new EventSource(ES_URL);
+      } catch (e) {
+        console.warn('[overlay] EventSource unavailable', e);
+        return;
+      }
+      es.onopen = function () { setConnected(true); };
+      es.onerror = function () { setConnected(false); };
+      es.onmessage = function (msg) {
+        if (!connected) setConnected(true);
+        var data;
+        try {
+          data = JSON.parse(msg.data);
+        } catch (e) {
+          console.warn('[overlay] bad event payload');
+          return;
+        }
+        handle(data);
+      };
+    }
+
+    connect();
+  })();
+</script>
+</body>
+</html>

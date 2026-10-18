@@ -108,5 +108,6 @@ orca terminal split --direction vertical --command "pi --name <任务名> @tmp/<
 3. ←/→ 变道生效；SPACE 起跳后 `#flightState` 由 `GROUND` 变为飞行态；Q/E 触发桶滚；F 切换自动驾驶按钮文案。
 4. 撞障碍 → `document.body.dataset.state` 依次为 `crashing` → `over`，结算屏出现，最高分写入 `localStorage['roadster-neon-best']`。
 5. 刷新后最高分保留。
+6. 进攻手段：`__ROADSTER_DEBUG.spawnCar(1, -16)` + 按住 W → `ramCount` 递增、`mode` 仍为 `playing`；不按 W 撞同一辆车 → `mode` 变 `crashing`。`spawnCone(1, -14)` 任何速度都撞飞。跳跃后按住 S/↓ 落地 → `slamCount` 递增。
 
 不要在未实际执行时声称"已验证"。

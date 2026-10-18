@@ -1657,6 +1657,7 @@
   var rearInnerGeo = new THREE.ConeGeometry(0.125, 1.55, 14, 1, true);
   rearInnerGeo.rotateX(-Math.PI / 2);
   var downPlumeGeo = new THREE.ConeGeometry(0.18, 1.55, 14, 1, true);
+  downPlumeGeo.rotateX(Math.PI); // 尖端朝下，向下喷
 
   var rearOuterMat = new THREE.MeshBasicMaterial({
     color: 0x38bfff, transparent: true, opacity: 0, depthWrite: false,
@@ -1703,7 +1704,7 @@
   var downPlumes = [], downGlows = [];
   [-1, 1].forEach(function (s) {
     var plume = new THREE.Mesh(downPlumeGeo, downPlumeMat);
-    plume.position.set(s * 0.55, -0.28, 0.15);
+    plume.position.set(s * 0.55, -0.55, 0.15);
     plume.visible = false;
     car.chassis.add(plume);
     downPlumes.push(plume);
@@ -1820,6 +1821,8 @@
      Obstacles
   ========================================================= */
   var obstacles = [];
+  var launched = [];  // 被撞飞/砸飞的障碍脱离 obstacles 数组，独立更新
+  var ramTypes = { sedan: 1, suv: 1, sports: 1, van: 1, police: 1, pickup: 1, truck: 1, bus: 1 };
   var obstaclePools = { cone: [], barrier: [], block: [], sedan: [], suv: [], sports: [], truck: [], van: [], bus: [], police: [], pickup: [] };
 
   var coneOrange = new THREE.MeshStandardMaterial({ color: 0xff4f18, emissive: 0x3d0d00, emissiveIntensity: 0.8, roughness: 0.5, metalness: 0.1 });
@@ -2127,15 +2130,51 @@
     var pool = obstaclePools[type];
     var obj = null;
     for (var i = 0; i < pool.length; i++) {
-      if (!pool[i].userData.active) { obj = pool[i]; break; }
+      if (!pool[i].userData.active && !pool[i].userData.launch) { obj = pool[i]; break; }
     }
     if (!obj) return;
     obj.userData.active = true;
     obj.userData.near = false;
+    obj.userData.killed = false;
     obj.visible = true;
+    obj.scale.set(1, 1, 1);
     obj.position.set(LANE_X[lane], 0, z);
-    obj.rotation.y = (type === 'cone') ? rnd(0, TAU) : rnd(-0.05, 0.05);
+    obj.rotation.set(0, (type === 'cone') ? rnd(0, TAU) : rnd(-0.05, 0.05), 0);
     obj.userData.prevZ = z;
+    // 抛飞回收的障碍被移出了 obstacles，重新上场时补回
+    if (obstacles.indexOf(obj) < 0) obstacles.push(obj);
+  }
+
+  /* 抛飞：标为非活跃并从 obstacles 移出（updateObstacles 末尾集中清理），
+     之后由 launched 逐帧播放，播完回收 */
+  function launchObstacle(o) {
+    if (o.userData.launch) return;
+    o.userData.active = false;
+    o.userData.near = true;  // 已撞飞，不再触发 near miss
+    o.userData.launch = { t: 0, dir: (o.position.x >= state.carX ? 1 : -1) };
+    launched.push(o);
+  }
+
+  function updateLaunched(dt) {
+    for (var i = launched.length - 1; i >= 0; i--) {
+      var o = launched[i];
+      var L = o.userData.launch;
+      L.t += dt;
+      o.position.x += L.dir * dt * 18;
+      o.position.y += dt * (6 - L.t * 9);
+      if (o.position.y < 0) o.position.y = 0;
+      o.rotation.z += L.dir * dt * 8;
+      var k = Math.max(0.001, 1 - L.t / 1.1);
+      o.scale.set(k, k, k);
+      if (L.t > 1.1) {
+        o.userData.killed = true;
+        o.userData.launch = null;
+        o.visible = false;
+        o.scale.set(1, 1, 1);
+        o.rotation.set(0, 0, 0);
+        launched.splice(i, 1);
+      }
+    }
   }
 
   function clearObstacles() {
@@ -2143,8 +2182,17 @@
       obstacles[i].userData.active = false;
       obstacles[i].visible = false;
     }
+    for (var j = 0; j < launched.length; j++) {
+      var lo = launched[j];
+      lo.userData.launch = null;
+      lo.userData.active = false;
+      lo.userData.killed = true;
+      lo.visible = false;
+      lo.scale.set(1, 1, 1);
+      lo.rotation.set(0, 0, 0);
+    }
+    launched.length = 0;
   }
-
   /* =========================================================
      Particles (custom Points shader)
   ========================================================= */
@@ -2370,16 +2418,16 @@
       );
     }
     if (!state.grounded && state.thrusting) {
-      for (var d = 0; d < 2; d++) {
+      for (var d = 0; d < 4; d++) {
         var ds = Math.random() < 0.5 ? -1 : 1;
         exhaust.emit(
           state.carX + ds * 0.55,
-          state.carY + 0.02,
+          state.carY - 0.05,
           0.2 + rnd(-0.25, 0.25),
           {
             life: rnd(0.2, 0.45),
             vx: rnd(-2.8, 2.8),
-            vy: rnd(-4.5, -1.2),
+            vy: rnd(-9, -4),
             vz: rnd(2, 6),
             s0: rnd(0.07, 0.16),
             s1: rnd(0.2, 0.38),
@@ -3137,6 +3185,11 @@
     audioTone(110, .8, 'sine', .22, 34);
     audioNoise(.5, .13, 1200, true);
   }
+  function sfxRam() {
+    audioNoise(.34, .12, 3200, false);
+    audioTone(150, .32, 'square', .07, 46);
+    audioNoise(.24, .07, 900, true);
+  }
   function sfxPickup(kind) {
     var base = kind === 'nitro' ? 330 : kind === 'shield' ? 440 : kind === 'magnet' ? 520 : kind === 'double' ? 660 : 740;
     audioTone(base, .16, 'triangle', .065, base * 1.5);
@@ -3258,7 +3311,9 @@
     landing: 0,
     maxAlt: 0,
     rearLevel: 0,
-    downLevel: 0
+    downLevel: 0,
+    ramCount: 0,
+    slamCount: 0
   };
 
   var bestDisplay = state.best;
@@ -3446,6 +3501,7 @@
   }
 
   function updateObstacles(dt, activeCheck) {
+    updateLaunched(dt);
     for (var i = 0; i < obstacles.length; i++) {
       var o = obstacles[i];
       if (!o.userData.active) continue;
@@ -3496,6 +3552,23 @@
              showPopup('SHIELD ABSORB <b>+150</b>');
              commentary('shield');
              sfxShield();
+           } else if (o.userData.type === 'cone') {
+             // 锥桶：任何速度都能撞飞，不掉速、不结束游戏
+             launchObstacle(o);
+             state.score += 50;
+             state.ramCount++;
+             state.shake = Math.max(state.shake, .22);
+             showPopup('RAM <b>+50</b>');
+             sfxRam();
+           } else if ((heldInput.boost || state.nitroTimer > 0) && ramTypes[o.userData.type]) {
+             // 冲撞：加速 / NITRO 中把车类障碍撞飞
+             launchObstacle(o);
+             state.score += 250;
+             state.ramCount++;
+             state.shake = Math.max(state.shake, .5);
+             state.speed *= 0.92;
+             showPopup('RAM <b>+250</b>');
+             sfxRam();
            } else {
              triggerCrash(o);
            }
@@ -3507,6 +3580,12 @@
         }
       } else {
         o.userData.prevZ = z1;
+      }
+    }
+    // 把已经抛飞的障碍从 obstacles 中清除，避免数组泄漏
+    if (launched.length) {
+      for (var k = obstacles.length - 1; k >= 0; k--) {
+        if (obstacles[k].userData.launch) obstacles.splice(k, 1);
       }
     }
   }
@@ -3575,6 +3654,8 @@
     state.maxAlt = 0;
     state.rearLevel = 0;
     state.downLevel = 0;
+    state.ramCount = 0;
+    state.slamCount = 0;
     state.exhaustAcc = 0;
     state.coins = 0;
     state.coinTimer = 1.4;
@@ -3777,6 +3858,32 @@
         }
       );
     }
+  }
+
+  function doSlam() {
+    var n = 0, pts = 0;
+    for (var i = obstacles.length - 1; i >= 0; i--) {
+      var o = obstacles[i];
+      if (!o.userData.active) continue;
+      if (Math.abs(o.position.z) >= 6) continue;
+      if (Math.abs(o.position.x - state.carX) >= 4) continue;
+      if (o.userData.type === 'cone') {
+        launchObstacle(o);
+        state.score += 50;
+        pts += 50;
+        n++;
+      } else if (ramTypes[o.userData.type]) {
+        launchObstacle(o);
+        state.score += 150;
+        pts += 150;
+        n++;
+      }
+    }
+    state.slamCount++;
+    state.shake = Math.max(state.shake, .6);
+    landingBurst(30, 1.7);
+    if (n > 0) showPopup('SLAM <b>+' + pts + '</b>');
+    sfxRam();
   }
 
   function demoLaneNearest(l) {
@@ -4018,6 +4125,7 @@
       state.air = Math.min(AIR_MAX, state.air + flight.regen * dt);
       if (hopNow && state.air > 2) {
         state.grounded = false;
+        state.maxAlt = 0;
         state.carY = 0.02;
         state.vy = flight.hopSpeed;
         state.air = Math.max(0, state.air - flight.hopCost);
@@ -4031,6 +4139,7 @@
         state.groundHold += dt;
         if (state.groundHold > 0.16) {
           state.grounded = false;
+          state.maxAlt = 0;
           state.carY = 0.02;
           state.vy = 8.4;
           state.air = Math.max(0, state.air - 3);
@@ -4074,19 +4183,21 @@
        }
       if (state.carY <= 0) {
         var impact = Math.max(0, -state.vy);
+        var slamReady = state.maxAlt > 1.2 && heldInput.dive;
         state.carY = 0;
         state.vy = 0;
         state.grounded = true;
         state.landing = clamp(impact / 15, 0, 1);
         state.shake = Math.max(state.shake, .14 + state.landing * .9);
-         if (state.airTime > 0.3) {
-           var airBonus = Math.round(state.airTime * 80);
-           state.score += airBonus;
-           showPopup('AIR TIME <b>+' + airBonus + '</b>');
-           landingBurst(12 + Math.round(state.landing * 16), 1 + state.landing);
+        if (state.airTime > 0.3) {
+          var airBonus = Math.round(state.airTime * 80);
+          state.score += airBonus;
+          showPopup('AIR TIME <b>+' + airBonus + '</b>');
+          landingBurst(12 + Math.round(state.landing * 16), 1 + state.landing);
           if (state.airTime > 1.35) commentary('land');
           if (impact > 4) sfxLand();
-         }
+        }
+        if (slamReady) doSlam();
         state.thrusting = false;
         state.groundHold = 0;
       }
@@ -4211,7 +4322,7 @@
       dp.scale.set(.7 + dl * .45, .35 + dl * 1.15, .7 + dl * .45);
       downGlows[d].scale.set(.001 + (.5 + dl * 1.05), .001 + (.5 + dl * 1.05), 1);
     }
-    downPlumeMat.opacity = .17 * dl;
+    downPlumeMat.opacity = .30 * dl;
     downGlowMat.opacity = .31 * dl;
   }
 
@@ -4570,6 +4681,26 @@
   }
 
   requestAnimationFrame(tick);
+
+  window.__ROADSTER_DEBUG = {
+    snapshot: function () {
+      return {
+        mode: state.mode, score: state.score, speed: state.speed,
+        carY: state.carY, grounded: state.grounded,
+        ramCount: state.ramCount || 0, slamCount: state.slamCount || 0
+      };
+    },
+    spawnCar: function (lane, z) {
+      if (state.mode !== 'playing') return false;
+      spawnObstacle('sedan', Math.max(0, Math.min(2, lane | 0)), typeof z === 'number' ? z : -30);
+      return true;
+    },
+    spawnCone: function (lane, z) {
+      if (state.mode !== 'playing') return false;
+      spawnObstacle('cone', Math.max(0, Math.min(2, lane | 0)), typeof z === 'number' ? z : -30);
+      return true;
+    }
+  };
 
   window.__DEMO = {
     enable: function () {

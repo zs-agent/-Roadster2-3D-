@@ -1567,6 +1567,8 @@
   precip.visible = false;
   scene.add(precip);
   var precipMode = 'off';
+  // watchdog 降画质后压制降水粒子：setWeather/setPrecipMode 不得把它拉回来
+  var precipMuted = false;
 
   function resetPrecipParticle(i, initial) {
     var p = i * 3;
@@ -1587,7 +1589,7 @@
     precip.material = mode === 'rain' ? precipMatRain : precipMatSand;
     for (var i = 0; i < PRECIP_COUNT; i++) resetPrecipParticle(i, true);
     precipGeo.attributes.position.needsUpdate = true;
-    precip.visible = true;
+    precip.visible = !precipMuted;
   }
 
   function updatePrecip(dt) {
@@ -5299,6 +5301,8 @@
     });
     el.over.classList.remove('hidden');
     document.body.dataset.state = 'over';
+    // 无人值守直播：结算 3 秒后自动重开；手动模式保持结算屏等玩家
+    if (autoPilot || wdAutorestart) scheduleAutoRestart();
   }
 
   /* =========================================================
@@ -6697,10 +6701,171 @@
   window.addEventListener('resize', function () {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
+    // 降画质后 resize 不得把 pixelRatio 顶回去
+    renderer.setPixelRatio(watchdog.qualityDropped ? 1 : Math.min(window.devicePixelRatio || 1, 1.6));
     renderer.setSize(window.innerWidth, window.innerHeight);
     resizeFx();
   });
+
+  /* =========================================================
+     Watchdog — 无人值守直播稳定性
+     autorestart / WebGL 上下文丢失 / 帧率 / RAF 停摆 / 内存 / 长跑
+     手动模式（非 autoPilot、无 autorestart=1）不重载、不降画质
+  ========================================================= */
+  var WD_RELOAD_KEY = 'roadster-watchdog-reload';
+  var WD_WINDOW_MS = 5000;
+  var WD_MEM_LIMIT = 1.2 * 1024 * 1024 * 1024;
+  var WD_GUARD_MS = 60000;
+  var WD_UPTIME_MS = 6 * 3600 * 1000;
+
+  var wdAutorestart = false;
+  try { wdAutorestart = /(^|[?&])autorestart=1(&|$)/.test(location.search || ''); } catch (e) { wdAutorestart = false; }
+
+  var watchdog = {
+    fps: 0,
+    frames: 0,
+    winT: 0,
+    lowStreak: 0,
+    lowStreakQ: 0,
+    qualityDropped: false,
+    lostAt: 0,
+    lastFrame: performance.now(),
+    reloadGuard: 0,
+    memHigh: 0,
+    memT: 0,
+    startedAt: performance.now(),
+    liveWas: false,
+    warnOnce: false,
+    restartId: 0
+  };
+
+  // 直播/无人值守模式：只有这些模式才允许自动重开、降画质、重载
+  function wdLive() {
+    return broadcastMode || autoPilot || demoMode || wdAutorestart;
+  }
+
+  function wdReload(reason) {
+    var now = Date.now();
+    var last = 0;
+    try { last = parseInt(sessionStorage.getItem(WD_RELOAD_KEY) || '0', 10) || 0; } catch (e) { last = 0; }
+    watchdog.reloadGuard = last;
+    // 60 秒内已经自动 reload 过：不再 reload，避免无限刷新
+    if (last && now - last < WD_GUARD_MS) {
+      if (!watchdog.warnOnce) {
+        watchdog.warnOnce = true;
+        console.warn('[watchdog] reload suppressed (' + reason + '): previous auto reload less than 60s ago');
+        try { showPopup('WATCHDOG <b>PAUSED</b>'); } catch (e) {}
+      }
+      return false;
+    }
+    watchdog.reloadGuard = now;
+    try { sessionStorage.setItem(WD_RELOAD_KEY, String(now)); } catch (e) {}
+    streamEvent('watchdogReload', { reason: reason, fps: Math.round(watchdog.fps) });
+    try { location.reload(); } catch (e) {}
+    return true;
+  }
+
+  function wdDropQuality() {
+    if (watchdog.qualityDropped) return;
+    watchdog.qualityDropped = true;
+    try {
+      renderer.setPixelRatio(1);
+      renderer.shadowMap.enabled = false;
+      precipMuted = true;
+      precip.visible = false;
+    } catch (e) {}
+    streamEvent('qualityDrop', { fps: Math.round(watchdog.fps) });
+    console.warn('[watchdog] quality dropped, fps=' + Math.round(watchdog.fps));
+  }
+
+  function scheduleAutoRestart() {
+    if (watchdog.restartId) return;
+    watchdog.restartId = setTimeout(function () {
+      watchdog.restartId = 0;
+      if (state.mode !== 'over') return;
+      streamEvent('autorestart', { score: Math.floor(state.score), distance: Math.floor(state.distance) });
+      startGame();
+    }, 3000);
+  }
+
+  function wdJudgeFps() {
+    if (!wdLive()) {
+      watchdog.lowStreak = 0;
+      watchdog.lowStreakQ = 0;
+      return;
+    }
+    if (!watchdog.qualityDropped) {
+      if (watchdog.fps < 22) watchdog.lowStreak++; else watchdog.lowStreak = 0;
+      if (watchdog.lowStreak >= 2) { watchdog.lowStreak = 0; wdDropQuality(); }
+      return;
+    }
+    if (watchdog.fps < 18) watchdog.lowStreakQ++; else watchdog.lowStreakQ = 0;
+    if (watchdog.lowStreakQ >= 2) { watchdog.lowStreakQ = 0; wdReload('fps'); }
+  }
+
+  // 每帧调用：只做计数，不 new 任何对象
+  function watchdogFrame(now) {
+    if (typeof now !== 'number') now = performance.now();
+    watchdog.lastFrame = now;
+    if (!watchdog.winT) { watchdog.winT = now; watchdog.frames = 0; return; }
+    watchdog.frames++;
+    var span = now - watchdog.winT;
+    if (span >= WD_WINDOW_MS) {
+      watchdog.fps = (watchdog.frames * 1000) / span;
+      watchdog.frames = 0;
+      watchdog.winT = now;
+      wdJudgeFps();
+    }
+  }
+
+  function wdSweep() {
+    var now = performance.now();
+    var live = wdLive();
+    // 从手动切到直播模式时重置基准，避免把之前闲置的时间算成停摆
+    if (live && !watchdog.liveWas) watchdog.lastFrame = now;
+    watchdog.liveWas = live;
+    if (!live) return;
+
+    // WebGL 上下文丢失 3 秒未恢复
+    if (watchdog.lostAt && now - watchdog.lostAt > 3000) {
+      watchdog.lostAt = 0;
+      wdReload('contextLost');
+      return;
+    }
+    // RAF 停摆（后台标签页不判定，避免误杀）；forceStall 供调试钩子模拟
+    var wdLast = watchdog.forceStall ? now - 6000 : watchdog.lastFrame;
+    if (document.visibilityState === 'visible' && now - wdLast > 4000) {
+      wdReload('stall');
+      return;
+    }
+    // 堆内存：每 30 秒采样，连续 3 次超 1.2GB
+    var mem = performance.memory;
+    if (mem && typeof mem.usedJSHeapSize === 'number') {
+      if (now - watchdog.memT >= 30000) {
+        watchdog.memT = now;
+        if (mem.usedJSHeapSize > WD_MEM_LIMIT) watchdog.memHigh++; else watchdog.memHigh = 0;
+        if (watchdog.memHigh >= 3) { watchdog.memHigh = 0; wdReload('memory'); return; }
+      }
+    }
+    // 长跑兜底：超过 6 小时重载一次
+    if (now - watchdog.startedAt > WD_UPTIME_MS) {
+      streamEvent('scheduledReload', { hours: +((now - watchdog.startedAt) / 3600000).toFixed(1) });
+      wdReload('uptime');
+    }
+  }
+
+  canvas.addEventListener('webglcontextlost', function (e) {
+    e.preventDefault();
+    watchdog.lostAt = performance.now();
+    streamEvent('contextLost', {});
+  }, false);
+
+  canvas.addEventListener('webglcontextrestored', function () {
+    watchdog.lostAt = 0;
+    streamEvent('contextRestored', {});
+  }, false);
+
+  setInterval(wdSweep, 2000);
 
   /* =========================================================
      Init
@@ -6721,6 +6886,7 @@
 
   function tick(ts) {
     requestAnimationFrame(tick);
+    watchdogFrame(ts);
     var realDt = Math.min(0.033, Math.max(0.0001, (ts - lastTs) / 1000));
     lastTs = ts;
     syncBroadcast();
@@ -6849,6 +7015,7 @@
         ramCount: state.ramCount || 0, slamCount: state.slamCount || 0,
         shot: director.shot, slow: director.slowT > 0,
         broadcastMode: broadcastMode, replayActive: replay.active,
+        fps: Math.round(watchdog.fps), qualityDropped: watchdog.qualityDropped,
         weather: weather.current, rocketT: rocket.active ? +rocket.t.toFixed(2) : 0,
         skyroadActive: skyRoad.active, rocketActive: rocket.active,
         ghost: ghost.active, bossHp: state.bossHp || 0, chaseT: +(state.chaseT || 0).toFixed(2),
@@ -6922,6 +7089,29 @@
     demoSlam: function () {
       doSlam();
       return true;
+    },
+    watchdog: function () {
+      return {
+        fps: Math.round(watchdog.fps),
+        qualityDropped: watchdog.qualityDropped,
+        lostAt: watchdog.lostAt,
+        lastFrame: watchdog.lastFrame,
+        reloadGuard: watchdog.reloadGuard
+      };
+    },
+    simulateStall: function () {
+      watchdog.lastFrame = performance.now() - 6000;
+      watchdog.forceStall = true;
+      return true;
+    },
+    loseContext: function () {
+      try {
+        var gl = renderer.getContext();
+        var ext = gl && gl.getExtension('WEBGL_lose_context');
+        if (!ext) return false;
+        ext.loseContext();
+        return true;
+      } catch (e) { return false; }
     }
   };
 

@@ -128,6 +128,19 @@ h1.brand em{font-style:normal;color:var(--red);font-size:.38em;line-height:1.5;l
 .hud-right{display:flex;align-items:center;gap:16px;pointer-events:auto;}
 #sound-toggle{border:1px solid rgba(160,195,225,.18);background:rgba(5,10,18,.42);color:#8da4b8;font-family:"Orbitron",sans-serif;font-size:8px;letter-spacing:.14em;padding:8px 11px;cursor:pointer;transition:.2s;}
 #sound-toggle:hover{border-color:rgba(111,232,255,.5);color:#d5eef8;}
+.hud-left{display:flex;flex-direction:column;gap:12px;}
+#nitro{width:min(232px,26vw);}
+.nitro-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:7px;}
+.nitro-head .kicker{font-size:8px;letter-spacing:.26em;color:#5f7488;}
+#nitro-label{font-family:"Orbitron",sans-serif;font-size:8px;letter-spacing:.18em;color:#4d6172;transition:color .25s;}
+.nitro-track{position:relative;height:5px;background:rgba(160,195,225,.12);border:1px solid rgba(111,232,255,.14);overflow:hidden;transition:border-color .25s,box-shadow .25s;}
+#nitro-fill{display:block;width:0;height:100%;background:linear-gradient(90deg,#2a8fb8,#6fe8ff 72%,#d8fbff);box-shadow:0 0 10px rgba(111,232,255,.55);transition:width .12s linear,opacity .25s;}
+#nitro.ready #nitro-label{color:#9fe4f8;}
+#nitro.low #nitro-fill{background:linear-gradient(90deg,#35424e,#5c7284);box-shadow:none;opacity:.55;}
+#nitro.low #nitro-label{color:#4a5d6d;}
+#nitro.boosting .nitro-track{border-color:rgba(111,232,255,.68);box-shadow:0 0 18px rgba(111,232,255,.42);}
+#nitro.boosting #nitro-fill{animation:nitroPulse .48s ease-in-out infinite;}
+@keyframes nitroPulse{0%,100%{opacity:1;box-shadow:0 0 16px rgba(111,232,255,.88);}50%{opacity:.42;box-shadow:0 0 4px rgba(111,232,255,.28);}}
 #toast{position:absolute;left:50%;top:31%;transform:translate(-50%,8px);font-family:"Orbitron",sans-serif;font-size:12px;letter-spacing:.22em;color:var(--cyan);text-shadow:0 0 18px rgba(111,232,255,.7);opacity:0;}
 #toast.show{animation:toastIn 1.25s ease-out;}
 #toast small{display:block;text-align:center;margin-top:7px;font-size:7px;letter-spacing:.28em;color:#a8c4d4;}
@@ -177,6 +190,7 @@ h1.brand em{font-style:normal;color:var(--red);font-size:.38em;line-height:1.5;l
   .stat-right{min-width:150px;}
   .hud-top{padding:20px 22px;}
   .hud-bottom{left:22px;right:22px;}
+  #nitro{width:min(180px,38vw);}
   .lede{font-size:14px;}
   .result-grid{grid-template-columns:repeat(2,1fr);}
 }
@@ -226,7 +240,16 @@ h1.brand em{font-style:normal;color:var(--red);font-size:.38em;line-height:1.5;l
     </div>
   </div>
   <div class="hud-bottom">
-    <div class="hint-keys"><kbd>←</kbd><kbd>→</kbd><span>变道 / STEER</span><span class="hint-sep">//</span><span>高速自动推进</span></div>
+    <div class="hud-left">
+      <div id="nitro" class="low">
+        <div class="nitro-head">
+          <span class="kicker">NITRO · 氮气</span>
+          <span id="nitro-label">CHARGING 0%</span>
+        </div>
+        <div class="nitro-track"><i id="nitro-fill"></i></div>
+      </div>
+      <div class="hint-keys"><kbd>←</kbd><kbd>→</kbd><span>变道 / STEER</span><span class="hint-sep">//</span><kbd>SPACE</kbd><span>氮气 / NITRO</span></div>
+    </div>
     <div class="hud-right">
       <button id="sound-toggle" aria-label="Toggle sound">SOUND ON</button>
       <span>M 静音</span>
@@ -328,7 +351,19 @@ let best = 0;
 let topSpeed = 0;
 let muted = false;
 let lastScore = 0;
+let finalScore = 0;
 let wheelSpin = 0;
+
+// nitro / boost
+const BOOST_TIME = 2.5;        // 加速持续秒数
+const BOOST_RATE = 1.45;       // 加速期间速度目标倍率
+const BOOST_SCORE_MUL = 1.5;   // 加速期间计分倍率
+const NITRO_MIN = .25;         // 释放所需最低能量
+const NITRO_GAIN = .22;        // 每次擦身获得能量
+let nitro = 0;
+let boosting = false;
+let boostTimer = 0;
+let boostBonus = 0;   // 加速期额外得分，累计入账，避免加速结束后分数回退
 
 try { best = parseInt(localStorage.getItem('roadster2_best') || '0', 10) || 0; } catch(e) { best = 0; }
 
@@ -1850,7 +1885,31 @@ function updateAudio(){
   audio.o1.frequency.setTargetAtTime(f, t, .08);
   audio.o2.frequency.setTargetAtTime(f*1.51, t, .08);
   audio.filter.frequency.setTargetAtTime(330 + norm*1600, t, .12);
-  audio.gain.gain.setTargetAtTime(active ? .017 + norm*.022 : .0, t, .16);
+  audio.gain.gain.setTargetAtTime(active ? .017 + norm*.022 + (boosting ? .012 : 0) : .0, t, .16);
+}
+function boostSound(){
+  if(!audio || muted) return;
+  const ctx = audio.ctx;
+  const t0 = ctx.currentTime;
+  const dur = .4;
+  const len = Math.floor(ctx.sampleRate*dur);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for(let i=0;i<len;i++){
+    const fadeIn = Math.min(1, i/(ctx.sampleRate*.05));
+    const env = Math.pow(1 - i/len, 1.6) * fadeIn;
+    data[i] = (Math.random()*2-1)*env;
+  }
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.4;
+  bp.frequency.setValueAtTime(420, t0);
+  bp.frequency.exponentialRampToValueAtTime(3200, t0 + .32);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(.0001, t0);
+  g.gain.exponentialRampToValueAtTime(.42, t0 + .06);
+  g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
+  src.connect(bp); bp.connect(g); g.connect(audio.master);
+  src.start();
 }
 function crashSound(){
   if(!audio || muted) return;
@@ -1895,6 +1954,9 @@ const elTach = document.getElementById('tach-fill');
 const toastEl = document.getElementById('toast');
 const toastMain = document.getElementById('toast-main');
 const toastSub = document.getElementById('toast-sub');
+const elNitro = document.getElementById('nitro');
+const elNitroFill = document.getElementById('nitro-fill');
+const elNitroLabel = document.getElementById('nitro-label');
 const menuBest = document.getElementById('menu-best');
 
 function fmt(n){ try { return Math.floor(n).toLocaleString('en-US'); } catch(e){ return String(Math.floor(n)); } }
@@ -1915,10 +1977,14 @@ function showToast(main, sub='NEAR MISS +50'){
   toastTimer = setTimeout(()=>toastEl.classList.remove('show'), 1300);
 }
 
+function currentScore(){
+  return Math.floor(distance*2 + bonus + boostBonus);
+}
+
 function updateHUD(){
   const kmh = Math.round(speed*3.6);
   const dist = Math.floor(distance);
-  const score = Math.floor(distance*2 + bonus);
+  const score = currentScore();
   elDist.textContent = fmt(dist);
   elSpeed.textContent = fmt(kmh);
   elScore.textContent = fmt(score);
@@ -1927,6 +1993,14 @@ function updateHUD(){
   const ratio = clamp(kmh/340,0,1);
   elTach.style.strokeDashoffset = String(283*(1-ratio*.94));
   if(ratio>.78) elTach.style.stroke = 'url(#tachGrad)';
+  const nitroPct = boosting ? clamp(boostTimer/BOOST_TIME,0,1)*100 : clamp(nitro,0,1)*100;
+  elNitroFill.style.width = nitroPct.toFixed(1) + '%';
+  elNitro.classList.toggle('ready', !boosting && nitro >= NITRO_MIN);
+  elNitro.classList.toggle('low', !boosting && nitro < NITRO_MIN);
+  elNitro.classList.toggle('boosting', boosting);
+  elNitroLabel.textContent = boosting
+    ? 'BOOSTING ' + boostTimer.toFixed(1) + 'S'
+    : (nitro >= NITRO_MIN ? 'READY · SPACE' : 'CHARGING ' + Math.round(clamp(nitro,0,1)*100) + '%');
   lastScore = score;
 }
 
@@ -1935,7 +2009,7 @@ function showGameOver(){
   hud.classList.add('hidden');
   document.getElementById('result-distance').innerHTML = fmt(distance) + '<em>M</em>';
   document.getElementById('result-speed').innerHTML = fmt(topSpeed*3.6) + '<em>KM/H</em>';
-  document.getElementById('result-score').textContent = fmt(lastScore);
+  document.getElementById('result-score').textContent = fmt(Math.max(lastScore, finalScore));
   document.getElementById('result-best').textContent = fmt(best);
   overScreen.classList.remove('hidden');
   const panel = overScreen.querySelector('.over-panel');
@@ -1951,7 +2025,8 @@ function resetRun(){
   elapsed = 0; distance = 0; bonus = 0; speed = BASE_SPEED; topSpeed = BASE_SPEED;
   lane = 1; targetLane = 1; lateralVel = 0; lean = 0; leanVel = 0;
   spawnTimer = 2.7; crashTimer = 0; crashShake = 0; crashSpin = 0; crashSlide = 0;
-  overShown = false; wheelSpin = 0;
+  overShown = false; wheelSpin = 0; finalScore = 0;
+  nitro = 0; boosting = false; boostTimer = 0; boostBonus = 0;
   carRoot.position.set(laneX(lane), 0, 0);
   carRoot.rotation.set(0,0,0);
   carVisual.position.set(0,.01,0);
@@ -1983,6 +2058,16 @@ function steer(dir){
   const next = clamp(targetLane + dir, 0, 3);
   if(next !== targetLane) targetLane = next;
 }
+
+function tryBoost(){
+  if(state !== 'playing' || boosting || nitro < NITRO_MIN) return false;
+  nitro = 0;
+  boosting = true;
+  boostTimer = BOOST_TIME;
+  boostSound();
+  showToast('NITRO', 'BOOST ENGAGED · 加速中');
+  return true;
+}
 window.addEventListener('keydown', (e)=>{
   if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space','Enter'].includes(e.code)) e.preventDefault();
   if((e.code==='Enter' || e.code==='Space') && (state==='menu' || state==='over')){
@@ -1990,6 +2075,7 @@ window.addEventListener('keydown', (e)=>{
     return;
   }
   if(e.code==='KeyM'){ initAudio(); toggleMute(); return; }
+  if(e.code==='Space' && state==='playing'){ if(!e.repeat) tryBoost(); return; }
   if(state!=='playing' || e.repeat) return;
   if(e.code==='ArrowLeft' || e.code==='KeyA') steer(-1);
   if(e.code==='ArrowRight' || e.code==='KeyD') steer(1);
@@ -2067,14 +2153,17 @@ function updateCamera(dt){
 const CAMERA_SHAKE_DECAY = 2.6;
 function crashWith(obstacle){
   if(state!=='playing') return;
+  const crashScore = currentScore(); // 结算前先锁定分数（含加速倍率）
   state='crash'; crashTimer=0; overShown=false;
+  boosting = false; boostTimer = 0;
   const impactX = carRoot.position.x;
   burstSparks(impactX + (obstacle.position.x>impactX? .8:-.8), .5, -1.9);
   crashShake = 1.15;
   crashSpin = (Math.random()<.5?-1:1)*rand(1.5,2.7);
   crashSlide = Math.sign(obstacle.position.x - impactX) * -rand(1.4,3.0);
   crashSound();
-  best = Math.max(best, Math.floor(distance*2+bonus));
+  finalScore = crashScore;
+  best = Math.max(best, crashScore);
   try { localStorage.setItem('roadster2_best', String(best)); } catch(e) {}
   refreshBestUI();
   const flash = document.getElementById('impact-flash');
@@ -2178,7 +2267,8 @@ function updateObstacles(dt, travel){
         o.userData.scored = true;
         if(Math.abs(o.position.x - carRoot.position.x) < 4.25){
           bonus += 50;
-          showToast('NEAR MISS', '+50 DODGE BONUS');
+          nitro = Math.min(1, nitro + NITRO_GAIN);
+          showToast('NEAR MISS', '+50 DODGE BONUS · NITRO +22%');
         }
       }
     }
@@ -2197,10 +2287,16 @@ const clock = new THREE.Clock();
 function updateSpeed(dt){
   if(state==='playing'){
     elapsed += dt;
-    const target = Math.min(MAX_SPEED, BASE_SPEED + elapsed*.56 + Math.pow(elapsed,1.18)*.045);
+    if(boostTimer > 0){
+      boostTimer = Math.max(0, boostTimer - dt);
+      if(boostTimer === 0) boosting = false;
+    }
+    const base = Math.min(MAX_SPEED, BASE_SPEED + elapsed*.56 + Math.pow(elapsed,1.18)*.045);
+    const target = base * (boosting ? BOOST_RATE : 1);
     speed += (target-speed)*(1-Math.exp(-dt*.65));
     topSpeed = Math.max(topSpeed, speed);
     distance += speed*dt;
+    if(boosting) boostBonus += speed*dt*2*(BOOST_SCORE_MUL-1);
   }
 }
 
@@ -2222,12 +2318,15 @@ function updateParticles(dt, travel){
 
 function updateEffects(dt, travel){
   const norm = clamp((speed-BASE_SPEED)/(MAX_SPEED-BASE_SPEED),0,1);
-  updateStreaks(dt, state==='over'?0:travel, norm);
+  const boostFx = boosting ? 1 : 0;
+  updateStreaks(dt, state==='over'?0:travel, clamp(norm + boostFx*.45, 0, 1.4));
   crashShake *= Math.exp(-CAMERA_SHAKE_DECAY*dt);
   postShaderMat.uniforms.uTime.value = time;
-     postShaderMat.uniforms.uBlur.value = (state==='menu'? .002 : norm*.052) + (state==='crash'?.02:0);
+     postShaderMat.uniforms.uBlur.value = (state==='menu'? .002 : norm*.052) + (state==='crash'?.02:0) + boostFx*.026;
   const headGlow = .55 + Math.sin(time*4.5)*.05;
   for(const g of carGlows) g.material.opacity = headGlow;
+  rearGlow.material.opacity = .33 + boostFx*(.34 + Math.sin(time*26)*.08);
+  tailRoadGlow.material.opacity = .09 + boostFx*(.11 + Math.sin(time*22)*.03);
   updateAudio();
 }
 
@@ -2270,6 +2369,24 @@ function animate(){
 // fix HUD hidden initial / menu best
  updateHUD();
 animate();
+
+/* ============================================================
+   Debug hooks (automation smoke test / read + addNitro only)
+   ============================================================ */
+window.__NEON_DEBUG = {
+  addNitro(v){
+    if(state !== 'playing') return nitro;
+    nitro = clamp(nitro + (Number(v) || 0), 0, 1);
+    updateHUD();
+    return nitro;
+  },
+  snapshot(){
+    return {
+      state, nitro, boosting, speed, distance, bonus,
+      score: Math.floor(distance*2 + bonus)
+    };
+  }
+};
 
 })();
 </script>

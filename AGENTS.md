@@ -112,5 +112,7 @@ orca terminal split --direction vertical --command "pi --name <任务名> @tmp/<
 7. 直播模式：`?director=1` 时 `snapshot().broadcastMode === true`，`setShot(name)` 能切换机位；真实 RAM 触发 `slow=true`、`replayActive=true` 且 `#replayVideo.src` 为 blob；`#subtitle` 有中文文案。
 8. 天气/事件：`setWeather('neonRain'|'sandstorm'|'day')` 画面与雾切换；`spawnSkyRoad()` 生成光环链；`startRocket()` 后 `rocketActive=true`、`carY` 上升到 10m 以上。
 9. overlay：`node stream/server.mjs` 后 POST `/event` 能出现在 `overlay.html` 事件条，游戏内 RAM 事件能实时同步。
+10. 无人值守：`?autorestart=1` 撞车后 3s 自动回到 `playing`；`__ROADSTER_DEBUG.simulateStall()` 与 `loseContext()` 会在 ~4s 内触发 reload；60s 内二次触发被抑制。
+11. 自动驾驶安全：`autoPilot` 下强行在三条车道刷车、Boss、追捕、塌陷、龙卷风，`mode` 始终为 `playing`。
 
 不要在未实际执行时声称"已验证"。
